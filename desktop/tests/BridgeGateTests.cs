@@ -1,0 +1,5 @@
+using System;
+internal static class BridgeGateTests {
+ static void Reject(Action action,string name){try{action();}catch(ArgumentException){Console.WriteLine("PASS "+name);return;}catch(InvalidOperationException){Console.WriteLine("PASS "+name);return;}throw new Exception(name);}
+ static void Main(){var gate=new BridgeGate();var id=Guid.NewGuid().ToString();Reject(()=>gate.Accept("foreign",id,1,"ready"),"foreign context");gate.Accept(gate.Context,id,1,"ready");Reject(()=>gate.Accept(gate.Context,id,2,"session.run"),"same id replay");Reject(()=>gate.Accept(gate.Context,Guid.NewGuid().ToString(),1,"session.run"),"stale sequence");for(int i=2;i<400;i++)gate.Accept(gate.Context,Guid.NewGuid().ToString(),i,"snapshot");Reject(()=>gate.Accept(gate.Context,id,1,"session.run"),"evicted id still stale");Reject(()=>gate.Accept(gate.Context,Guid.NewGuid().ToString(),400,"ready"),"ready cannot restart");gate.Invalidate();Reject(()=>gate.Accept(gate.Context,Guid.NewGuid().ToString(),400,"session.run"),"fatal invalidation");}
+}

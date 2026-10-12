@@ -1,0 +1,23 @@
+/* Independently authored RemSup design tokens. Logical CSS px, not device pixels. */
+:root {
+  --blue-600:#2360d3;--blue-700:#1d50b3;--blue-800:#174292;
+  --space-1:4px;--space-2:8px;--space-3:12px;--space-4:16px;--space-5:20px;--space-6:24px;--space-8:32px;
+  --canvas:#f3f6fb;--surface:#fff;--tonal:#eaf1fa;--ink:#17263c;--muted:#52647d;--border:#d7e1ee;--control-border:#73859e;
+  --primary:var(--blue-600);--primary-hover:var(--blue-700);--primary-pressed:var(--blue-800);--on-primary:#fff;
+  --selected:#e8f0ff;--accent:#1e56be;--error:#ac2934;--warning:#805700;--good:#176a49;--focus:#2360d3;
+  --disabled:#e5eaf2;--disabled-ink:#59697e;--shadow:0 2px 8px rgb(23 38 60 / 6%);
+  --font:"Segoe UI Variable","Segoe UI",sans-serif;--mono:"Cascadia Mono",Consolas,monospace;
+  --body-size:13px;--body-line:18px;--helper-size:12px;--heading-size:19px;
+  --button-height:36px;--copy-height:32px;--field-height:36px;--radius-control:10px;--radius-card:16px;
+  --screen-padding:16px;--card-padding:16px;--motion-fast:140ms;--motion-panel:180ms;
+}
+[data-theme="dark"] {
+  color-scheme:dark;--canvas:#111827;--surface:#1b2638;--tonal:#172235;--ink:#f1f5fa;--muted:#b8c7da;
+  --border:#3e5069;--control-border:#8496af;--selected:#2b405f;--accent:#b7d0ff;--error:#ffadb4;--warning:#ebc579;
+  --good:#83d6ac;--focus:#b7d0ff;--disabled:#34445b;--disabled-ink:#becadc;--shadow:0 2px 8px rgb(0 0 0 / 10%);
+}
+[data-reduced="true"] {--motion-fast:0ms;--motion-panel:0ms;}
+@media (prefers-reduced-motion:reduce) {:root {--motion-fast:0ms;--motion-panel:0ms;}}
+@media (forced-colors:active) {
+  :root,[data-theme="dark"] {--canvas:Canvas;--surface:Canvas;--tonal:Canvas;--ink:CanvasText;--muted:CanvasText;--border:ButtonText;--control-border:ButtonText;--primary:Highlight;--primary-hover:Highlight;--primary-pressed:Highlight;--on-primary:HighlightText;--selected:Highlight;--accent:LinkText;--error:CanvasText;--warning:CanvasText;--good:CanvasText;--focus:Highlight;--disabled:Canvas;--disabled-ink:GrayText;--shadow:none;}
+}

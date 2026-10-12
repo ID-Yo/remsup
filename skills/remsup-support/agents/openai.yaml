@@ -1,0 +1,4 @@
+interface:
+  display_name: "Remsup Support"
+  short_description: "Authorized commands and screen control through Remsup MCP"
+  default_prompt: "Use $remsup-support for the authorized Windows task: use the protected saved profile, verify the device identity, choose command or screen tools, and confirm the result."

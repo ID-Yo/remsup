@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <UseWPF>true</UseWPF>
+    <StartupObject>UpdateProcessTests</StartupObject>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="UpdateProcessTests.cs;../host/UpdateBootstrap.cs;../host/HostUpdateHandoff.cs;../host/UpdateManager.cs;../../shared/ApplicationInstance.cs" />
+  </ItemGroup>
+</Project>

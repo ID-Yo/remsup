@@ -1,0 +1,15 @@
+**/node_modules/
+**/bin/
+**/obj/
+__pycache__/
+*.pyc
+*.log
+.env
+.env.*
+build/
+releases/
+desktop/ui/dist/
+desktop/host/bundled-notices/
+assets/*.png
+assets/*.ico
+desktop/ui/public/*.png

@@ -1,0 +1,29 @@
+[Unit]
+Description=Remsup MCP Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=remsup-mcp
+Group=remsup-mcp
+WorkingDirectory=/opt/remsup/mcp
+Environment=REMSUP_RELAY_HOST=127.0.0.1
+Environment=REMSUP_RELAY_PORT=8443
+Environment=REMSUP_AUDIT_LOG=/var/log/remsup/mcp-audit.jsonl
+Environment=REMSUP_COMMAND_TIMEOUT_SECONDS=30
+Environment=REMSUP_MAX_OUTPUT_BYTES=262144
+Environment=REMSUP_MCP_HOST=127.0.0.1
+Environment=REMSUP_MCP_PORT=8765
+Environment=REMSUP_MCP_TRANSPORT=streamable-http
+Environment=REMSUP_MCP_PUBLIC_URL=http://127.0.0.1:8765
+EnvironmentFile=/etc/remsup/mcp.env
+ExecStart=/opt/remsup/.venv/bin/python /opt/remsup/mcp/remsup_mcp_server.py
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+

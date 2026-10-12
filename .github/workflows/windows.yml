@@ -1,0 +1,76 @@
+name: Windows build and tests
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Channel pairing and relay lifetime regressions
+        run: python3 tests/relay/test_relay.py
+  modern-desktop:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24.21.0
+          cache: npm
+          cache-dependency-path: desktop/ui/package-lock.json
+      - uses: actions/setup-dotnet@67a3573c9a986a3f9c594539f4ab511d57bb3ce9
+        with:
+          dotnet-version: 10.0.401
+      - name: Modern UI, host and single EXE review package
+        shell: pwsh
+        run: ./scripts/build-modern-desktop.ps1 -Publish -Output "$env:RUNNER_TEMP/releases/modern-review"
+      - name: Screen loopback MCP dependencies
+        shell: pwsh
+        run: python -m pip install -r mcp/requirements.txt
+      - name: Modern bridge and settings contracts
+        shell: pwsh
+        run: ./scripts/test-modern-desktop.ps1 -OutputRoot "$env:RUNNER_TEMP/modern-tests"
+      - name: Dependency audit
+        shell: pwsh
+        run: npm.cmd audit --prefix desktop/ui --audit-level=low
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Remsup-v1.25-tls-updates-single-exe-review-${{ github.sha }}
+          path: ${{ runner.temp }}/releases/modern-review
+          retention-days: 3
+          if-no-files-found: error
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Core and vault tests
+        shell: powershell
+        run: ./scripts/test-windows.ps1
+      - name: Build all Windows editions
+        shell: powershell
+        run: ./scripts/build-release.ps1 -Version v1.9
+      - name: MCP protocol and screen contracts
+        shell: powershell
+        run: |
+          python -m pip install -r mcp/requirements.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B -m unittest discover -s tests/mcp -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/mcp/test-operator-wrapper.ps1 -OutputRoot "$env:RUNNER_TEMP/remsup-operator-wrapper"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          ./tests/mcp/test-profile-policy.ps1 -OutputRoot "$env:RUNNER_TEMP/remsup-profile-policy"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B scripts/check-skill-data.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Documentation and existing Python suites
+        shell: powershell
+        run: |
+          python -B scripts/scan-public.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -B -m unittest discover -s tests -v
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --check

@@ -1,0 +1,15 @@
+const pause=ms=>new Promise(r=>setTimeout(r,ms));
+const assert=(v,m)=>{if(!v)throw Error(m)};
+const click=(text,root=document)=>{const b=[...root.querySelectorAll('button')].find(b=>b.textContent.trim()===text);assert(b,'Missing button '+text);b.click();return b};
+const input=async(el,text)=>{assert(el,'Input missing');Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(el,text);el.dispatchEvent(new Event('input',{bubbles:true}));await pause(100)};
+const shot=async name=>{await pause(450);window.fixtureShots.push(name);for(let i=0;i<80&&window.fixtureCaptured!==name;i++)await pause(100);assert(window.fixtureCaptured===name,'Capture failed '+name)};
+const home=async()=>{click('Home');await pause(100)};const settings=async()=>{click('Settings');await pause(100)};
+await shot('home-light');document.querySelector('[title="Switch color theme"]').click();await pause(250);await shot('home-dark');document.querySelector('[title="Switch color theme"]').click();await pause(250);
+await settings();await shot('settings-network');click('Security');await shot('settings-security');await shot('settings-no-password');click('Discard');await pause(150);await home();
+click('＋ Add device');await shot('editor-default');click('Custom');await shot('editor-custom');click('LAN');click('Password and local note ＋');await shot('editor-lan-expanded');click('Cancel',document.querySelector('.dialog'));await pause(150);
+const open=document.querySelector('.device .card-actions button');open.click();await pause(800);assert(document.querySelector('.session-main'),'No session');await shot('session-idle');
+await input(document.querySelector('.session-command input'),'echo retained draft');click('Limits · 30s');await pause(50);await input(document.querySelector('.two-fields input'),'17');await settings();await home();document.querySelector('.session-tabs [role=tab]').click();await pause(150);assert(document.querySelector('.session-command input').value==='echo retained draft','Draft lost across navigation');assert(document.querySelector('.two-fields input').value==='17','Limit lost');
+click('Run command');await pause(50);await shot('session-busy');await pause(650);await shot('session-complete');
+await input(document.querySelector('.session-command input'),'fixture fail');click('Run command');await pause(650);await shot('session-nonzero');await input(document.querySelector('.session-command input'),'fixture timeout');click('Run command');await pause(650);await shot('session-unknown');
+await home();for(let i=0;i<7;i++){await input(document.querySelector('.id-input'),String(400000000+i));click('Connect');await pause(650);await home();}assert(document.querySelectorAll('.session-tabs [role=tab]').length===8,'Eight sessions missing');await shot('eight-tabs');click('More');await shot('eight-tabs-menu');
+window.fixtureResult={draftRetained:true,limitsRetained:true,eightSessions:true,fixtureStopped:true};

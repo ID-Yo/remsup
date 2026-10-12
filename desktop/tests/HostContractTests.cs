@@ -1,0 +1,55 @@
+using System;
+using System.IO;
+using System.Reflection;
+using System.Text.Json;
+using System.Threading.Tasks;
+using System.Windows;
+internal sealed class TestDialogs:IHostDialogs {
+ internal int Copies,Confirms,Errors;internal string Copied,LastError;
+ public bool Confirm(string title,string text){Confirms++;return true;}public string Credential(string title,string value)=>"fixture-password";public void Reveal(string title,string value){}public void Copy(string value){Copies++;Copied=value;}public void Error(string message){Errors++;LastError=message;}
+}
+internal static class HostContractTests {
+ static void Check(bool value,string message){if(!value)throw new Exception(message);}
+ static JsonElement Payload(string json)=>JsonDocument.Parse(json).RootElement.Clone();
+ static async Task Reject(Func<Task<object>> operation,string name){try{await operation();}catch(ArgumentException){Console.WriteLine("PASS "+name);return;}throw new Exception("Expected rejection: "+name);}
+ [STAThread]static void Main(string[] args){var app=new Application();var window=new Window{Width=1,Height=1,ShowInTaskbar=false};window.Loaded+=async(_,__)=>{try{
+  Check(LanAccessPolicy.ExecutablePath==Environment.ProcessPath,"LAN single-file application path");var local=SupportHost.LocalIPv4Addresses();Check(local.Count==new System.Collections.Generic.HashSet<string>(local).Count,"distinct detected addresses");foreach(var address in local)Check(SupportHost.LocalPrivateAddress(System.Net.IPAddress.Parse(address)),"active private detected address");Check(!SupportHost.PrivateAddress(System.Net.IPAddress.Loopback)&&!SupportHost.PrivateAddress(System.Net.IPAddress.Parse("169.254.1.2"))&&!SupportHost.PrivateAddress(System.Net.IPAddress.Parse("8.8.8.8")),"loopback link-local public excluded");string root=args[0];Directory.CreateDirectory(root);var dialogs=new TestDialogs();using var host=new HostController(new HostOptions(new[]{"--fixture-root",root}),dialogs);
+  var handoffFlag=typeof(HostController).GetField("updateHandoffActive",BindingFlags.Instance|BindingFlags.NonPublic);var queuedExit=typeof(HostController).GetField("exitAfterUpdate",BindingFlags.Instance|BindingFlags.NonPublic);Check(handoffFlag!=null&&queuedExit!=null,"update exit guard fields");handoffFlag.SetValue(host,true);Check(!host.RequestUserExit()&&(bool)queuedExit.GetValue(host),"user exit is deferred until update readiness or rollback");handoffFlag.SetValue(host,false);queuedExit.SetValue(host,false);
+  await Reject(()=>host.HandleAsync("identity.copy",Payload("{\"field\":\"unknown\"}")),"unknown clipboard field");Check(dialogs.Copies==0,"clipboard unchanged on rejection");
+  await Reject(()=>host.HandleAsync("identity.copy",Payload("{\"field\":\"id\",\"extra\":true}")),"extra payload field");
+  await Reject(()=>host.HandleAsync("profile.clear",Payload("{\"recordId\":\"bad\"}")),"invalid secret context");
+  await Reject(()=>host.HandleAsync("help.copy",Payload("{\"template\":\"arbitrary\"}")),"unapproved help template");
+  await Reject(()=>host.HandleAsync("help.copy",Payload("{\"template\":\"problem-report\",\"text\":\"secret\"}")),"arbitrary report text");
+  await Reject(()=>host.HandleAsync("help.releases",Payload("{\"url\":\"https://evil.example\"}")),"arbitrary external URL");Check(dialogs.Copies==0,"rejected help cannot copy");
+  foreach(var name in new[]{"mcp-config","mcp-tunnel","identity-probe","scope","problem-report"}){await host.HandleAsync("help.copy",Payload(JsonSerializer.Serialize(new{template=name})));Check(dialogs.Copied==HelpContent.Template(name,false,new SupportSnapshot(1,SupportState.Stopped,false,false,"ignored")),"exact allowlisted clipboard template");}
+  var poisoned=new SupportSnapshot(1,SupportState.Failed,false,false,"SENTINEL_PASSWORD_TOKEN_ID_IP_LOG");Check(!HelpContent.Report(false,poisoned).Contains(poisoned.Reason),"report omits arbitrary state reason");host.Fail("SENTINEL_RAW_ERROR");var help=JsonSerializer.SerializeToElement(host.Snapshot()).GetProperty("help");Check(!help.GetRawText().Contains("SENTINEL_RAW_ERROR")&&!help.GetProperty("report").GetString().Contains("111222333")&&!help.GetProperty("report").GetString().Contains("192.168.1.25"),"help report excludes errors and identity/address");
+  Check(!JsonSerializer.SerializeToElement(host.Snapshot()).GetRawText().Contains("unencrypted"),"LAN warning absent on fresh disabled receiver");
+  int licenses=0;host.NoticesRequested+=()=>licenses++;await host.HandleAsync("licenses",Payload("{}"));await host.HandleAsync("diagnostics",Payload("{}"));Check(licenses==1&&dialogs.Errors==1,"existing licenses and diagnostics reused");Check(!dialogs.LastError.Contains("unencrypted"),"disabled LAN diagnostics omit unencrypted warning");var release=JsonSerializer.SerializeToElement(await host.HandleAsync("help.releases",Payload("{}")));Check(release.GetProperty("url").GetString()==HelpContent.Releases&&!release.GetProperty("opened").GetBoolean(),"fixture fixed releases URL without external launch");
+  var connect=await host.HandleAsync("session.connect",Payload("{\"recordId\":\"\",\"deviceId\":\"123456789\",\"mode\":\"Default\",\"host\":\"\",\"port\":8443}"));
+  var session=JsonSerializer.SerializeToElement(connect).GetProperty("sessionId").GetString();
+  var running=host.HandleAsync("session.run",Payload(JsonSerializer.Serialize(new{sessionId=session,command="slow synthetic command",seconds=15,bytes=1024})));
+  await Task.Delay(150);
+  Check(JsonSerializer.SerializeToElement(host.Snapshot()).GetProperty("sessions")[0].GetProperty("busy").GetBoolean(),"command operation is active in SessionWorkspace");
+  await host.HandleAsync("screen.request",Payload(JsonSerializer.Serialize(new{sessionId=session,monitorId="synthetic",control=false})));await Task.Delay(250);
+  await host.HandleAsync("screen.status",Payload(JsonSerializer.Serialize(new{sessionId=session})));
+  Check(JsonSerializer.SerializeToElement(host.Snapshot()).GetProperty("sessions")[0].GetProperty("screen").GetProperty("canView").GetBoolean(),"screen request is independent of same-device command gate");
+  await running;await host.HandleAsync("screen.close",Payload(JsonSerializer.Serialize(new{sessionId=session})));
+  await Reject(()=>host.HandleAsync("session.run",Payload("{\"sessionId\":\""+session+"\",\"command\":\"echo once\",\"seconds\":30,\"bytes\":1024,\"unexpected\":1}")),"run extra field");
+  await host.HandleAsync("session.close",Payload("{\"sessionId\":\""+session+"\"}"));try{await host.HandleAsync("session.run",Payload("{\"sessionId\":\""+session+"\",\"command\":\"echo once\",\"seconds\":30,\"bytes\":1024}"));throw new Exception("closed session executed");}catch(InvalidOperationException){Console.WriteLine("PASS closed session rejected");}
+  var snapshot=JsonSerializer.SerializeToElement(host.Snapshot());Check(snapshot.GetProperty("addresses").GetArrayLength()==2,"multiple fixture addresses");Check(snapshot.GetProperty("transport").GetProperty("color").GetString()=="red","stopped fixture lamp");Check(!File.Exists(Path.Combine(root,"settings.txt")),"snapshot does not save settings");
+  var lanConnect=await host.HandleAsync("session.connect",Payload("{\"recordId\":\"\",\"deviceId\":\"123456789\",\"mode\":\"LAN\",\"host\":\"192.168.1.9\",\"port\":8444,\"pin\":\"0000000000000000000000000000000000000000000000000000000000000000\"}"));
+  Check(!JsonSerializer.SerializeToElement(host.Snapshot()).GetRawText().Contains("unencrypted"),"explicit LAN session warns without enabling receiver");
+  await host.HandleAsync("diagnostics",Payload("{}"));Check(!dialogs.LastError.Contains("unencrypted")&&dialogs.LastError.Contains("SPKI"),"LAN diagnostics describe verified TLS");
+  await host.HandleAsync("session.close",Payload(JsonSerializer.Serialize(new{sessionId=JsonSerializer.SerializeToElement(lanConnect).GetProperty("sessionId").GetString()})));
+  Check(!JsonSerializer.SerializeToElement(host.Snapshot()).GetRawText().Contains("unencrypted"),"LAN warning clears when LAN session closes");
+  using(var screens=new ScreenWorkspace(true)){Check(JsonSerializer.SerializeToElement(screens.Receiving).GetProperty("warning").GetString().Contains("pinned TLS"),"LAN screen receiving describes pinned TLS");}
+  Check(!snapshot.GetProperty("screenReceiving").GetProperty("warning").GetString().Contains("unencrypted"),"disabled LAN screen receiving warning absent");
+  var before=File.ReadAllText(Path.Combine(root,"vault","devices-v2.json"));await host.ReadyAsync();Check(!File.Exists(Path.Combine(root,"runtime.txt")),"fixture never starts receiving");
+  Check(snapshot.GetProperty("settings").GetProperty("allowScreenView").GetBoolean()&&snapshot.GetProperty("settings").GetProperty("allowScreenControl").GetBoolean()&&snapshot.GetProperty("settings").GetProperty("autoAcceptScreenSessions").GetBoolean()&&snapshot.GetProperty("screenReceiving").GetProperty("enabled").GetBoolean(),"fresh settings allow screen with local owner autoaccept policy");Check(snapshot.GetProperty("settings").GetProperty("autoUpdates").GetBoolean(),"automatic updates default on");await host.HandleAsync("update.check",Payload("{}"));await Reject(()=>host.HandleAsync("update.check",Payload("{\"url\":\"https://untrusted.invalid\"}")),"update source cannot be supplied by renderer");
+  await host.HandleAsync("settings.save",Payload("{\"relayHost\":\"\",\"relayPort\":443,\"relayPin\":\"\",\"autoUpdates\":true,\"autoStart\":false,\"lanEnabled\":false,\"lanAddress\":\"\",\"lanPort\":8444,\"allowScreenView\":false,\"allowScreenControl\":false,\"autoAcceptScreenSessions\":false}"));
+  using(var reopened=new HostController(new HostOptions(new[]{"--fixture-root",root}),dialogs)){var saved=JsonSerializer.SerializeToElement(reopened.Snapshot());Check(!saved.GetProperty("settings").GetProperty("allowScreenView").GetBoolean()&&!saved.GetProperty("settings").GetProperty("allowScreenControl").GetBoolean()&&!saved.GetProperty("settings").GetProperty("autoAcceptScreenSessions").GetBoolean()&&!saved.GetProperty("screenReceiving").GetProperty("enabled").GetBoolean(),"screen policy persisted and applied after reopen");}
+  await Reject(()=>host.HandleAsync("screen.request",Payload("{\"sessionId\":\"unused\",\"monitorId\":\"\",\"control\":false,\"testMode\":true}")),"old testMode field rejected");
+  await Reject(()=>host.HandleAsync("screen.text",Payload("{\"sessionId\":\"unused\",\"frameId\":\"unused\",\"geometryVersion\":1,\"text\":\"test\",\"grant\":true}")),"keyboard cannot carry grant");
+  Console.WriteLine("Host schema/clipboard/closed-session/fixture/settings persistence contracts PASS");Environment.ExitCode=0;
+ }catch(Exception ex){Console.WriteLine(ex.ToString());Environment.ExitCode=1;}finally{window.Close();}};app.Run(window);}
+}
