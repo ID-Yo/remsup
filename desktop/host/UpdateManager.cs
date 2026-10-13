@@ -74,12 +74,14 @@ internal sealed class UpdateInstallResult
     internal UpdateInstallStatus Status { get; }
     internal bool OldRegistrationsRestored { get; }
     internal string Error { get; }
+    internal string ErrorCode { get; }
 
-    internal UpdateInstallResult(UpdateInstallStatus status, bool oldRegistrationsRestored = false, string error = "")
+    internal UpdateInstallResult(UpdateInstallStatus status, bool oldRegistrationsRestored = false, string error = "", string errorCode = "")
     {
         Status = status;
         OldRegistrationsRestored = oldRegistrationsRestored;
         Error = error;
+        ErrorCode = errorCode;
     }
 }
 
@@ -126,6 +128,7 @@ internal sealed class UpdateManager : IDisposable
     readonly string currentVersion;
     readonly string dataDirectory;
     bool disposed;
+    internal Action<UpdateInstallResult> InstallOutcome;
 
     internal UpdateManager(HttpClient pinnedClient, string currentVersion, string dataDirectory)
     {
@@ -251,7 +254,7 @@ internal sealed class UpdateManager : IDisposable
                 bool restored = fileRestored && registrationsRestored;
                 return new UpdateInstallResult(restored ? UpdateInstallStatus.RolledBack : UpdateInstallStatus.RecoveryFailed, registrationsRestored,
                     restored ? "The candidate did not register both TLS relay channels; the previous executable and relay registrations were restored." :
-                    fileRestored ? "The previous executable was restored, but its relay registrations did not recover." : "The candidate failed and the previous executable could not be restored.");
+                    fileRestored ? "The previous executable was restored, but its relay registrations did not recover." : "The candidate failed and the previous executable could not be restored.", restored ? "readiness-failed" : "recovery-failed");
             }
 
             string commitError = "";
@@ -262,6 +265,8 @@ internal sealed class UpdateManager : IDisposable
                 if (installed && predecessorMoved) File.SetLastWriteTimeUtc(backup, DateTime.UtcNow);
                 committed?.Invoke();
             } catch (Exception error) { commitError = "The app started, but installation registration/cleanup needs repair: " + error.Message; }
+            // Persist the accepted outcome before the predecessor can exit.
+            try { InstallOutcome?.Invoke(new UpdateInstallResult(UpdateInstallStatus.Installed, error: commitError)); } catch { /* Diagnostics cannot undo an accepted candidate. */ }
             // Once readiness is accepted, always close the predecessor, even if registration fails.
             try { await handoff.CompleteOldProcessAsync(CancellationToken.None).ConfigureAwait(false); }
             catch (Exception error) { commitError += " The old process did not close cleanly: " + error.Message; }

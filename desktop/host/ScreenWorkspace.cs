@@ -1,4 +1,5 @@
 using System;
+using System.Text.Json;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
@@ -14,6 +15,7 @@ internal sealed class ScreenWorkspace:IDisposable
     readonly Dictionary<string,ScreenPeer> peers=new Dictionary<string,ScreenPeer>();readonly Dictionary<string,object> states=new Dictionary<string,object>();
     ScreenAccess receiver;ScreenConsentWindow consent;IScreenSurface surface;Stream incoming;volatile bool enabled,disposed;bool controlAllowed=true;string operatorLabel="";
     internal event Action Changed;
+    internal Func<string,JsonElement,Func<bool>,object> SettingsHandler;
     internal ScreenWorkspace(bool synthetic){fixture=synthetic;Enable(true);}
     internal object Receiving=>new{enabled,state=receiver?.Snapshot.State.ToString()??"Off",operatorLabel,canView=receiver?.Snapshot.CanView??false,canControl=receiver?.Snapshot.CanControl??false,warning="Relay and direct LAN connections use pinned TLS."};
     internal object Snapshot(string id)=>states.TryGetValue(id,out var state)?state:new{state="Off",canView=false,canControl=false,operatorLabel="",preview=(string)null,width=0,height=0,frameId="",geometryVersion=0,error=""};
@@ -28,7 +30,7 @@ internal sealed class ScreenWorkspace:IDisposable
     internal void Serve(Stream stream,CancellationToken token)
     {
         if(!enabled||disposed){RemsupProtocol.WriteLine(stream,"REMSUPSCREEN1 ERROR screen-disabled");return;}
-        incoming=stream;RemsupProtocol.WriteLine(stream,"REMSUPSCREEN1 OK");var channel=new ScreenChannel(receiver);
+        incoming=stream;RemsupProtocol.WriteLine(stream,"REMSUPSCREEN1 OK");var channel=new ScreenChannel(receiver);channel.SettingsHandler=SettingsHandler;
         channel.ConsentRequested+=(snapshot,label)=>dispatcher.BeginInvoke(new Action(()=>{if(disposed||!enabled||receiver.Snapshot.SessionId!=snapshot.SessionId)return;operatorLabel=label;if(consent==null){consent=new ScreenConsentWindow(receiver);consent.Revoked+=StopReceiver;consent.Changed+=()=>Changed?.Invoke();consent.Closed+=(_,__)=>consent=null;}consent.OperatorLabel=label;consent.ShowCurrentRequest();try{receiver.GrantConfigured(snapshot.SessionId,snapshot.ConnectionId);}catch(InvalidOperationException){}consent.Refresh();Changed?.Invoke();}));
         try{channel.Run(stream,Guid.NewGuid().ToString("D"),token);}
         finally{if(incoming==stream){incoming=null;dispatcher.BeginInvoke(new Action(()=>Changed?.Invoke()));}}

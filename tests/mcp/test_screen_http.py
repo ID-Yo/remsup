@@ -88,7 +88,12 @@ class SyntheticStream:
             self.reply.write(struct.pack(">I", len(png)) + png)
             self.reply.seek(0)
             return
-        write_metadata(self.reply, {"version": 1, "request_id": request["request_id"], "session_id": self.session, "state": self.state, "can_view": self.state == "Granted", "can_control": self.state == "Granted", "remaining_ms": max(0, int((self.deadline-time.monotonic())*1000))})
+        response = {"version": 1, "request_id": request["request_id"], "session_id": self.session, "state": self.state, "can_view": self.state == "Granted", "can_control": self.state == "Granted", "remaining_ms": max(0, int((self.deadline-time.monotonic())*1000))}
+        if operation == "settings.read":
+            response.update(settings={"autoUpdates": True, "relayHost": "relay.example.test", "relayPort": 443, "relayPin": "a" * 64, "lanEnabled": False, "lanAddress": "192.168.1.2", "lanPort": 8444}, settings_error="")
+        elif operation == "settings.set":
+            response.update(settings={"result": "applied", "connection_may_close": False}, settings_error="")
+        write_metadata(self.reply, response)
         self.reply.seek(0)
     def read(self, size):
         return self.reply.read(size)
@@ -109,7 +114,10 @@ class ScreenHttpTests(unittest.TestCase):
         mcp = server.build_mcp(config)
         for name in ("request", "status", "capture", "mouse", "text", "key", "close"):
             mcp.add_tool(getattr(server, "remsup_screen_" + name), name="remsup_screen_" + name)
+        mcp.add_tool(server.remsup_settings_read)
+        mcp.add_tool(server.remsup_settings_set)
         mcp.add_tool(server.remsup_exec_command)
+        mcp.add_tool(server.remsup_diagnostics)
         sock = socket.socket()
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -126,21 +134,35 @@ class ScreenHttpTests(unittest.TestCase):
                 self.assertTrue(mcp.settings.stateless_http)
                 with httpx.Client(base_url=f"http://127.0.0.1:{port}") as client:
                     def call(name, args, token="owner-token"):
-                        response = client.post("/mcp", headers={"Authorization": "Bearer " + token, "Accept": "application/json, text/event-stream"}, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "remsup_screen_" + name, "arguments": args}})
+                        tool = "remsup_settings_" + name.removeprefix("settings_") if name.startswith("settings_") else "remsup_screen_" + name
+                        response = client.post("/mcp", headers={"Authorization": "Bearer " + token, "Accept": "application/json, text/event-stream"}, json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": tool, "arguments": args}})
                         self.assertEqual(response.status_code, 200)
                         return response.json()["result"]
                     self.assertEqual(client.post("/mcp").status_code, 401)
                     listing = client.post("/mcp", headers={"Authorization": "Bearer owner-token", "Accept": "application/json, text/event-stream"}, json={"jsonrpc": "2.0", "id": 3, "method": "tools/list"}).json()["result"]["tools"]
                     tools = {tool["name"]: tool for tool in listing}
                     self.assertEqual(set(tools["remsup_exec_command"]["inputSchema"]["properties"]), {"device_id", "otp", "command"})
+                    self.assertEqual(set(tools["remsup_diagnostics"]["inputSchema"]["properties"]), {"device_id", "otp"})
                     self.assertEqual(set(tools["remsup_screen_request"]["inputSchema"]["properties"]), {"device_id", "otp", "monitor_id", "control"})
                     self.assertEqual(set(tools["remsup_screen_capture"]["inputSchema"]["properties"]), {"session_id"})
+                    self.assertEqual(set(tools["remsup_settings_read"]["inputSchema"]["properties"]), {"session_id"})
+                    self.assertEqual(set(tools["remsup_settings_set"]["inputSchema"]["properties"]), {"session_id", "name", "value"})
+                    self.assertEqual(set(tools["remsup_settings_set"]["inputSchema"]["required"]), {"session_id", "name", "value"})
                     def request():
                         result = call("request", {"device_id": "111222333", "otp": "synthetic-only", "monitor_id": "synthetic", "control": False})
                         self.assertFalse(result.get("isError", False), result)
                         return json.loads(result["content"][0]["text"])["session_id"]
                     session = request()
                     streams[-1].grant()
+                    self.assertFalse(call("status", {"session_id": session}).get("isError", False))
+                    read = call("settings_read", {"session_id": session})
+                    self.assertFalse(read.get("isError", False), read)
+                    read_value = json.loads(read["content"][0]["text"])
+                    self.assertEqual(read_value["settings"]["relayHost"], "relay.example.test")
+                    self.assertNotIn("password", read["content"][0]["text"].lower())
+                    changed = call("settings_set", {"session_id": session, "name": "autoUpdates", "value": False})
+                    self.assertFalse(changed.get("isError", False), changed)
+                    self.assertEqual(json.loads(changed["content"][0]["text"])["result"], "applied")
                     capture = call("capture", {"session_id": session})
                     self.assertFalse(capture.get("isError", False), capture)
                     limited = call("capture", {"session_id": session})

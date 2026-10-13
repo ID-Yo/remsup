@@ -43,6 +43,72 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         await self.module.execute(self.request,fake)
         self.assertNotIn('remsup_exec_command',calls)
         self.assertEqual(calls[-1],'remsup_screen_close')
+
+    async def test_screen_settings_actions_use_same_control_session_and_close(self):
+        self.request.update(operation='screen',monitor_id='synthetic',screen_actions=[
+            {'action':'settings-read'},
+            {'action':'settings-set','name':'autoUpdates','value':False},
+            {'action':'close'}])
+        calls=[]
+        async def fake(name,args):
+            calls.append((name,args))
+            return {
+                'remsup_health':{'ok':True,'relay_host':'127.0.0.1','relay_port':8443},
+                'remsup_screen_capabilities':{'available':True,'monitors':[{'monitor_id':'synthetic'}]},
+                'remsup_screen_request':{'session_id':'session'},
+                'remsup_screen_status':{'state':'Granted','can_view':True,'can_control':True},
+                'remsup_settings_read':{'settings':{'autoUpdates':True}},
+                'remsup_settings_set':{'result':'applied'},
+                'remsup_screen_close':{'result':'closed'},
+            }[name]
+        result=await self.module.execute(self.request,fake)
+        names=[name for name,_ in calls]
+        self.assertEqual(names.count('remsup_settings_read'),1)
+        self.assertEqual(names.count('remsup_settings_set'),1)
+        self.assertEqual(calls[names.index('remsup_settings_set')][1],{'session_id':'session','name':'autoUpdates','value':False})
+        self.assertEqual(names[-1],'remsup_screen_close')
+        self.assertNotIn('remsup_exec_command',names)
+        self.assertEqual(result['screen'][0]['result']['settings']['autoUpdates'],True)
+
+    async def test_screen_settings_forbidden_value_and_extra_fields_stay_local(self):
+        for action in (
+            {'action':'settings-set','name':'allowRemoteSettings','value':True},
+            {'action':'settings-set','name':'lanEnabled','value':True},
+            {'action':'settings-set','name':'autoUpdates','value':False,'extra':'rejected'},
+        ):
+            self.request.update(operation='screen',monitor_id='synthetic',screen_actions=[action])
+            calls=[]
+            async def fake(name,args):
+                calls.append(name)
+                return {'remsup_health':{'ok':True,'relay_host':'127.0.0.1','relay_port':8443},
+                        'remsup_screen_capabilities':{'available':True,'monitors':[{'monitor_id':'synthetic'}]},
+                        'remsup_screen_request':{'session_id':'session'},
+                        'remsup_screen_status':{'state':'Granted','can_view':True,'can_control':True},
+                        'remsup_screen_close':{}}[name]
+            with self.assertRaises(self.module.ClientError):
+                await self.module.execute(self.request,fake)
+            self.assertNotIn('remsup_settings_set',calls)
+            self.assertEqual(calls[-1],'remsup_screen_close')
+
+    async def test_screen_settings_unknown_write_stops_without_replay(self):
+        setting_writes=[]
+        self.request.update(operation='screen',monitor_id='synthetic',screen_actions=[
+            {'action':'settings-set','name':'relayHost','value':'relay.example.test'},
+            {'action':'settings-set','name':'relayHost','value':'relay.example.test'}])
+        calls=[]
+        async def fake(name,args):
+            calls.append(name)
+            if name=='remsup_settings_set':
+                setting_writes.append(args)
+                return {'settings_error':'outcome-unknown'}
+            return {'remsup_health':{'ok':True,'relay_host':'127.0.0.1','relay_port':8443},
+                    'remsup_screen_capabilities':{'available':True,'monitors':[{'monitor_id':'synthetic'}]},
+                    'remsup_screen_request':{'session_id':'session'},
+                    'remsup_screen_status':{'state':'Granted','can_view':True,'can_control':True},
+                    'remsup_screen_close':{}}[name]
+        await self.module.execute(self.request,fake)
+        self.assertEqual(len(setting_writes),1)
+        self.assertEqual(calls[-1],'remsup_screen_close')
     async def test_unknown_mutation_is_never_retried(self):
         commands=[]
         async def fake(name,args):
@@ -83,6 +149,34 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_busy_error_is_explicit(self):
         self.assertEqual(self.module.remote_error_category('ERR busy: command channel in use'),'busy')
+    async def test_diagnostics_route_requires_and_returns_sanitized_diagnostics_tool(self):
+        self.request.update(operation='diagnostics')
+        calls=[]
+        async def fake(name,args):
+            calls.append((name,args))
+            if name=='remsup_health':return {'ok':True,'relay_host':'127.0.0.1','relay_port':8443}
+            return {'schema_version':1,'status':'ok','version':'v1.48','lan':{'configured':False,'enabled':False,'ready':False,'warning':'PASSWORD_SENTINEL'},'relay':{'state':'RelayWaiting','ready':True},'updates':{'enabled':True,'last_check':None,'last_download':None,'last_install':None,'latest_errors':[]},'raw':'PASSWORD_SENTINEL TOKEN_SENTINEL'}
+        result=await self.module.execute(self.request,fake)
+        self.assertEqual([name for name,_ in calls],['remsup_health','remsup_diagnostics'])
+        self.assertEqual(calls[-1][1],{'device_id':'123456789','otp':'PASSWORD_SENTINEL'})
+        serialized=self.module.sanitize(result,self.request)
+        self.assertNotIn('PASSWORD_SENTINEL',serialized);self.assertNotIn('TOKEN_SENTINEL',serialized)
+        self.assertEqual(result['diagnostics']['lan']['warning'],'LAN diagnostics unavailable.')
+        self.assertNotIn('raw',result['diagnostics'])
+
+    async def test_diagnostics_tool_preflight_checks_required_names_and_exact_schema(self):
+        class Tool:
+            def __init__(self,name,schema):self.name=name;self.inputSchema=schema
+        class Session:
+            def __init__(self,tools):self.tools=tools
+            async def list_tools(self):return type('Listing',(),{'tools':self.tools})()
+        ok=Tool('remsup_diagnostics',{'type':'object','properties':{'device_id':{'type':'string'},'otp':{'type':'string'}},'required':['device_id','otp']})
+        await self.module.diagnostics_tool_preflight(Session([Tool('remsup_health',{}),ok]))
+        with self.assertRaisesRegex(self.module.ClientError,'required-diagnostics-tools-unavailable'):
+            await self.module.diagnostics_tool_preflight(Session([Tool('remsup_health',{})]))
+        wrong=Tool('remsup_diagnostics',{'type':'object','properties':{'device_id':{'type':'string'},'otp':{'type':'string'},'command':{'type':'string'}},'required':['device_id','otp','command']})
+        with self.assertRaisesRegex(self.module.ClientError,'schema-mismatch'):
+            await self.module.diagnostics_tool_preflight(Session([Tool('remsup_health',{}),wrong]))
     async def test_screen_refusal_extracts_allowlisted_code_only(self):
         import json
         for code in ('stale-frame','geometry-changed','lease-expired','protected-window','local-input-active'):
@@ -198,7 +292,10 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             output=self.module.sanitize(result,self.request)
             self.assertIn('[REDACTED]',output);self.assertNotIn('PASSWORD_SENTINEL',output);self.assertNotIn('TOKEN_SENTINEL',output)
             self.assertEqual(result['result']['exit_code'],0)
+            self.request['operation']='diagnostics'
+            self.assertIn('diagnostics',await self.module.sdk_run(self.request,f'http://127.0.0.1:{port}/mcp'))
             self.request['command']='fixture-busy'
+            self.request['operation']='exec'
             with self.assertRaises(BaseExceptionGroup) as failure:
                 await self.module.sdk_run(self.request,f'http://127.0.0.1:{port}/mcp')
             self.assertIn('busy: no automatic retry',repr(failure.exception))

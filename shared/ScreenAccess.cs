@@ -49,6 +49,7 @@ internal sealed class ScreenAccess
     public void GrantConfigured(Guid id,string connection){lock(gate){var current=session.Snapshot;if(!autoAcceptLocal||!viewAllowed||current.State!=ScreenSessionState.Pending||current.SessionId!=id||current.ConnectionId!=connection)return;Interactive();session.GrantLocal(id,current.RequestedControl&&controlAllowed,true);}}
     public void DenyLocal(Guid id){lock(gate)session.DenyLocal(id);}
     public void Stop(){lock(gate)session.Revoke();}
+    public void RequireControl(string connection,Guid lease){lock(gate){session.Require(connection,lease,true);Interactive();}}
     public void DisableControl(){lock(gate)session.DisableControl();}
     public void Disconnect(string connection){lock(gate)session.Disconnect(connection);}
     public ScreenGeometry[] Monitors(){lock(gate){Interactive();return surface.Monitors();}}

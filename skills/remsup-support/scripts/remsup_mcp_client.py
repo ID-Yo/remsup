@@ -10,7 +10,8 @@ import socket
 import subprocess
 import sys
 import time
-from datetime import datetime
+import re
+from datetime import datetime, timedelta
 from urllib.parse import urlparse
 
 class ClientError(Exception):
@@ -18,6 +19,103 @@ class ClientError(Exception):
         super().__init__(message);self.details=details or {}
 
 SCREEN_REFUSAL_CODES=frozenset(('permission-required','mouse-disabled','typing-disabled','control-required','session-mismatch','stale-frame','geometry-changed','geometry-version-mismatch','coordinates-out-of-range','invalid-action','invalid-scroll','input-rate-limit','protected-window','desktop-unavailable','dpi-unavailable','monitor-unavailable','local-input-active','foreground-required','foreground-monitor-mismatch','modifiers-held','keyboard-context-changed','invalid-keyboard-operation','key-not-allowed','text-size-limit','invalid-text','lease-expired'))
+DIAGNOSTIC_STATES=frozenset(('Stopped','Connecting','RelayWaiting','SessionActive','Reconnecting','Failed'))
+DIAGNOSTIC_CHECK_RESULTS=frozenset(('Current','Available','Error','Disabled'))
+DIAGNOSTIC_INSTALL_RESULTS=frozenset(('Installed','Deferred','RolledBack','RecoveryFailed','Failed'))
+DIAGNOSTIC_ERROR_CODES=frozenset(('', 'check-failed','download-failed','readiness-failed','install-failed','recovery-failed','registration-repair','diagnostics-unavailable'))
+DIAGNOSTIC_FAILURES={
+    'unsupported':frozenset(('wrong-channel',)),
+    'unavailable':frozenset(('unavailable','no-agent','busy','transport-unavailable')),
+    'denied':frozenset(('invalid-request','relay-denied','authenticated-caller-required')),
+    'error':frozenset(('response-too-large','incomplete-response','invalid-response','relay-error','diagnostics-unavailable')),
+}
+DIAGNOSTIC_WARNINGS=frozenset((
+    "LAN IP is inactive. Refresh addresses and choose this computer's active private IPv4.",
+    "LAN port must be 1-65535.",
+    "The network is Public — change it to Private in Windows Settings before using LAN.",
+    "LAN requires a Windows Private network. Check the network profile in Windows Settings.",
+    "The scoped LAN firewall rule is missing. Select Prepare LAN firewall for this address and app.",
+    "LAN identity is unavailable. Restore this Windows user's protected identity; it was not regenerated.",
+    "LAN listener could not start. Check whether the address/port is already in use.",
+    "LAN diagnostics unavailable.",
+))
+SETTING_TYPES={'autoUpdates':bool,'relayHost':str,'relayPort':int,'relayPin':str,'lanAddress':str,'lanPort':int,'lanEnabled':bool}
+SETTING_STRING_LIMITS={'relayHost':253,'relayPin':100,'lanAddress':45}
+
+def _diag_utc(value):
+    if not isinstance(value,str) or len(value)>40 or not (value.endswith('Z') or value.endswith('+00:00')):raise ValueError()
+    parsed=datetime.fromisoformat(value.replace('Z','+00:00'))
+    if parsed.tzinfo is None or parsed.utcoffset()!=timedelta(0):raise ValueError()
+    return value
+
+def _diag_version(value,optional=False):
+    if value is None and optional:return None
+    if not isinstance(value,str) or len(value)>32 or not re.fullmatch(r'v1\.\d{1,6}',value):raise ValueError()
+    return value
+
+def _diag_code(value):
+    return value if isinstance(value,str) and value in DIAGNOSTIC_ERROR_CODES else 'diagnostics-unavailable'
+
+def project_diagnostics(value):
+    """Keep only the bounded diagnostic contract before it reaches the caller."""
+    if isinstance(value,dict) and value.get('status') in DIAGNOSTIC_FAILURES:
+        status=value['status'];code=value.get('error_code')
+        if isinstance(code,str) and code in DIAGNOSTIC_FAILURES[status]:return {'status':status,'error_code':code}
+        return {'status':'error','error_code':'invalid-response'}
+    try:
+        if not isinstance(value,dict) or type(value.get('schema_version')) is not int or value.get('schema_version')!=1 or value.get('status')!='ok':raise ValueError()
+        lan=value.get('lan');relay=value.get('relay');updates=value.get('updates')
+        if not isinstance(lan,dict) or not isinstance(relay,dict) or not isinstance(updates,dict):raise ValueError()
+        if any(type(lan.get(key)) is not bool for key in ('configured','enabled','ready')):raise ValueError()
+        warning=lan.get('warning')
+        if not isinstance(warning,str):raise ValueError()
+        if warning not in DIAGNOSTIC_WARNINGS:warning='LAN diagnostics unavailable.' if warning else ''
+        state=relay.get('state');ready=relay.get('ready')
+        if not isinstance(state,str) or state not in DIAGNOSTIC_STATES or type(ready) is not bool:raise ValueError()
+        if type(updates.get('enabled')) is not bool:raise ValueError()
+        check=updates.get('last_check')
+        if check is not None:
+            if not isinstance(check,dict) or not isinstance(check.get('result'),str) or check['result'] not in DIAGNOSTIC_CHECK_RESULTS:raise ValueError()
+            check={'utc':_diag_utc(check.get('utc')),'result':check['result'],'version':_diag_version(check.get('version'),True),'error_code':_diag_code(check.get('error_code'))}
+        download=updates.get('last_download')
+        if download is not None:
+            if not isinstance(download,dict):raise ValueError()
+            sha=download.get('sha256')
+            if not isinstance(sha,str) or not re.fullmatch(r'[0-9a-f]{64}',sha):raise ValueError()
+            download={'utc':_diag_utc(download.get('utc')),'version':_diag_version(download.get('version')),'sha256':sha}
+        install=updates.get('last_install')
+        if install is not None:
+            if not isinstance(install,dict) or not isinstance(install.get('result'),str) or install['result'] not in DIAGNOSTIC_INSTALL_RESULTS:raise ValueError()
+            install={'utc':_diag_utc(install.get('utc')),'result':install['result'],'error_code':_diag_code(install.get('error_code'))}
+        errors=updates.get('latest_errors')
+        if not isinstance(errors,list) or len(errors)>8:raise ValueError()
+        latest=[]
+        for item in errors:
+            if not isinstance(item,dict):raise ValueError()
+            latest.append({'utc':_diag_utc(item.get('utc')),'code':_diag_code(item.get('code'))})
+        return {'schema_version':1,'status':'ok','version':_diag_version(value.get('version')),
+                'lan':{'configured':lan['configured'],'enabled':lan['enabled'],'ready':lan['ready'],'warning':warning},
+                'relay':{'state':state,'ready':ready},
+                'updates':{'enabled':updates['enabled'],'last_check':check,'last_download':download,'last_install':install,'latest_errors':latest}}
+    except (TypeError,ValueError,KeyError,OverflowError):
+        return {'status':'error','error_code':'invalid-response'}
+
+async def diagnostics_tool_preflight(session):
+    listing=await session.list_tools()
+    tools={tool.name:tool for tool in listing.tools}
+    if not {'remsup_health','remsup_diagnostics'}.issubset(tools):
+        raise ClientError('required-diagnostics-tools-unavailable')
+    schema=tools['remsup_diagnostics'].inputSchema
+    properties=schema.get('properties') if isinstance(schema,dict) else None
+    required=schema.get('required') if isinstance(schema,dict) else None
+    if not isinstance(properties,dict) or set(properties)!={'device_id','otp'} or not isinstance(required,list) or set(required)!={'device_id','otp'} or any(not isinstance(properties[key],dict) or properties[key].get('type')!='string' for key in ('device_id','otp')):
+        raise ClientError('diagnostics-tool-schema-mismatch')
+
+def validate_diagnostics_credentials(device_id,otp):
+    if not isinstance(device_id,str) or len(device_id)>32 or not all(ch.isascii() and (ch.isdigit() or ch in ' -()') for ch in device_id) or sum(ch.isdigit() for ch in device_id)!=9:
+        raise ClientError('invalid-request')
+    if not isinstance(otp,str) or not 1<=len(otp)<=128 or not otp.isascii() or any(ord(ch)<=32 or ord(ch)>126 for ch in otp):
+        raise ClientError('invalid-request')
 
 def screen_refusal(text):
     try:
@@ -49,6 +147,8 @@ def route_check(request, health):
         raise ClientError('route-mismatch: saved profile differs from provisioned relay')
 
 async def execute(request, call, emit=None, next_action=None):
+    if request.get('operation')=='diagnostics':
+        validate_diagnostics_credentials(request.get('profile',{}).get('DeviceId'),request.get('otp'))
     health=await call('remsup_health',{})
     if request['operation']=='health':
         route=request['route']
@@ -58,6 +158,14 @@ async def execute(request, call, emit=None, next_action=None):
     credential={'device_id':request['profile']['DeviceId'],'otp':request['otp']}
     if request['operation']=='exec':
         return {'result':await call('remsup_exec_command',{**credential,'command':request['command']})}
+    if request['operation']=='diagnostics':
+        result=project_diagnostics(await call('remsup_diagnostics',credential))
+        if result.get('status')!='ok':
+            code=result.get('error_code')
+            if code not in ('wrong-channel','unavailable','no-agent','busy','relay-denied','invalid-request','response-too-large','invalid-response','incomplete-response','transport-unavailable','relay-error','diagnostics-unavailable'):
+                code='diagnostics-unavailable'
+            raise ClientError(code)
+        return {'diagnostics':result}
     capabilities=await call('remsup_screen_capabilities',credential)
     if request.get('capabilities_only'):return {'capabilities':capabilities}
     if not capabilities.get('available') or request['monitor_id'] not in [m['monitor_id'] for m in capabilities['monitors']]:
@@ -81,6 +189,38 @@ async def execute(request, call, emit=None, next_action=None):
             if kind=='close':
                 if emit:emit({'operation':'close','frame_age_seconds':frame_age(last,received) if last else None})
                 break
+            if kind in ('settings-read','settings-set'):
+                expected={'action'} if kind=='settings-read' else {'action','name','value'}
+                if set(action)!=expected:
+                    raise ClientError('invalid-settings-action-fields')
+                if kind=='settings-set':
+                    name=action['name'];value=action['value']
+                    expected_type=SETTING_TYPES.get(name) if isinstance(name,str) else None
+                    if expected_type is None:
+                        raise ClientError('settings-forbidden')
+                    if type(value) is not expected_type:
+                        raise ClientError('settings-invalid-value')
+                    if expected_type is str and len(value)>SETTING_STRING_LIMITS[name]:
+                        raise ClientError('settings-invalid-value')
+                    if expected_type is int and not 1<=value<=65535:
+                        raise ClientError('settings-invalid-value')
+                    if name=='lanEnabled' and value is not False:
+                        raise ClientError('settings-forbidden')
+                status=await call('remsup_screen_status',{'session_id':sid})
+                if status.get('state')!='Granted' or status.get('can_control') is not True:
+                    raise ClientError('control-required')
+                age=frame_age(last,received) if last else None
+                if emit:emit({'operation':kind,'frame_age_seconds':age})
+                if kind=='settings-read':
+                    result=await call('remsup_settings_read',{'session_id':sid})
+                else:
+                    result=await call('remsup_settings_set',{'session_id':sid,'name':name,'value':value})
+                event={'operation':kind,'result':result};results.append(event)
+                if emit:emit(event)
+                # A network-setting acknowledgement can be followed by a reconnect. Never replay it.
+                if result.get('settings_error')=='outcome-unknown' or result.get('connection_may_close') is True:
+                    break
+                continue
             fields={'capture':set(),'status':set(),'mouse':{'frame_id','geometry_version','action','x','y','scroll_steps'},'text':{'frame_id','geometry_version','text'},'key':{'frame_id','geometry_version','key'}}
             # Wrapper action is named operation for mouse to retain its protocol action.
             kind=action.get('operation',kind)
@@ -148,17 +288,24 @@ async def sdk_run(request,endpoint):
     async with httpx.AsyncClient(headers={'Authorization':'Bearer '+request['token']},timeout=httpx.Timeout(15,read=request['timeout']),follow_redirects=False) as http_client, streamable_http_client(endpoint,http_client=http_client,terminate_on_close=True) as (reader,writer,_):
         async with ClientSession(reader,writer) as session:
             await session.initialize()
+            if request['operation']=='diagnostics':
+                await diagnostics_tool_preflight(session)
             async def call(name,args):
                 result=await asyncio.wait_for(session.call_tool(name,args),request['timeout'])
                 texts=[item.text for item in result.content if item.type=='text']
                 if result.isError:
+                    if name=='remsup_diagnostics':return {'status':'error','error_code':'diagnostics-unavailable'}
                     text=' '.join(texts)
                     refusal=screen_refusal(text) if name.startswith('remsup_screen_') else None
                     if refusal:raise ClientError(refusal['error'],refusal)
                     category=remote_error_category(text)
                     if category=='outcome-unknown':raise ClientError(category,{'dispatched':None,'channel_terminated':True,'warning':'Do not retry automatically; open a new session, take and inspect a new capture.'})
                     raise ClientError(category+': no automatic retry; outcome may be unknown')
-                value=json.loads(texts[0]) if texts else {}
+                try:value=json.loads(texts[0]) if texts else {}
+                except (ValueError,TypeError):
+                    if name=='remsup_diagnostics':return {'status':'error','error_code':'invalid-response'}
+                    raise
+                if name=='remsup_diagnostics':value=project_diagnostics(value)
                 images=[item for item in result.content if item.type=='image']
                 if images:
                     output=pathlib.Path(request['image_directory']).resolve();output.mkdir(parents=True,exist_ok=True)
@@ -189,7 +336,7 @@ def main():
         line=sys.stdin.readline(1024*1024+1)
         if len(line)>1024*1024:raise ClientError('request-too-large')
         request=json.loads(line)
-        if request.get('operation') not in ('health','exec','screen') or not 1<=request.get('timeout',0)<=90:raise ClientError('invalid-operation-or-timeout')
+        if request.get('operation') not in ('health','exec','diagnostics','screen') or not 1<=request.get('timeout',0)<=90:raise ClientError('invalid-operation-or-timeout')
         with tunnel(request['config']) as endpoint:
             result=asyncio.run(asyncio.wait_for(sdk_run(request,endpoint),630 if request.get('interactive') else min(300,request['timeout']*5)))
         print(sanitize({'ok':True,**result},request),flush=True)

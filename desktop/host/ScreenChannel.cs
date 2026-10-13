@@ -8,6 +8,7 @@ using System.Threading;
 internal sealed class ScreenChannel
 {
     readonly ScreenAccess access;
+    internal Func<string,JsonElement,Func<bool>,object> SettingsHandler;
     internal event Action<ScreenSessionSnapshot,string> ConsentRequested;
     internal ScreenChannel(ScreenAccess owner){access=owner??throw new ArgumentNullException(nameof(owner));}
     internal void Run(Stream stream,string connection,CancellationToken cancel)
@@ -80,6 +81,14 @@ internal sealed class ScreenChannel
             lease=Id(request,"session_id");var state=access.Snapshot;
             if(state.SessionId!=lease||state.ConnectionId!=connection)throw new InvalidOperationException("session-mismatch");
             if(operation=="status"||operation=="close")Fields(request,"version","request_id","operation","session_id");
+            else if(operation=="settings.read"||operation=="settings.set")
+            {
+                if(operation=="settings.read")Fields(request,"version","request_id","operation","session_id");else Fields(request,"version","request_id","operation","session_id","name","value");
+                object result=null;string error="";
+                try{access.RequireControl(connection,lease);if(SettingsHandler==null)throw new InvalidOperationException("settings-unavailable");result=SettingsHandler(operation,request,()=>{access.RequireControl(connection,lease);return true;});}
+                catch(Exception ex){error=ex is InvalidOperationException&&(ex.Message=="settings-disabled"||ex.Message=="settings-forbidden"||ex.Message=="permission-required"||ex.Message=="control-required"||ex.Message=="settings-busy")?ex.Message:"settings-unavailable";}
+                var current=access.Snapshot;Write(stream,new{version=1,request_id=requestId,session_id=lease.ToString("D"),state=current.State.ToString(),can_view=current.CanView,can_control=current.CanControl,remaining_ms=current.RemainingMs,settings=result,settings_error=error});stream.Flush();return true;
+            }
             else if(operation=="capture")
             {
                 Fields(request,"version","request_id","operation","session_id");ScreenCaptureResult result;

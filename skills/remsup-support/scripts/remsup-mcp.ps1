@@ -1,5 +1,5 @@
 param(
- [ValidateSet('health','exec','screen')][string]$Operation='health',
+ [ValidateSet('health','exec','diagnostics','screen')][string]$Operation='health',
  [ValidatePattern('^[a-zA-Z0-9_-]{1,40}$')][string]$Agent='codex',
  [string]$Name,[string]$DeviceId,
  [string]$Command,[string]$CommandFile,[string]$MonitorId,[switch]$Control,[switch]$CapabilitiesOnly,
@@ -28,11 +28,13 @@ try {
  if($Operation -eq 'screen' -and -not $CapabilitiesOnly -and (-not $MonitorId -or -not $ImageDirectory -or $ImageDirectory -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+\\)')){throw 'screen requires capabilities monitor and absolute private ImageDirectory'}
  $port=if($PSBoundParameters.ContainsKey('LocalPort')){$LocalPort}elseif($config.local_port_explicit -or ($config.local_port -and $config.local_port -ne 18765)){$config.local_port}else{0}
  $request=@{operation=$Operation;token=$token;config=@{ssh_alias=$config.ssh_alias;endpoint=$config.endpoint;local_port=$port};route=$config.route;timeout=$TimeoutSeconds}
- if($Operation -ne 'health'){
+ if($Operation -eq 'exec'){
   $request.command=$Command
+ }
+ if($Operation -eq 'screen'){
   $request.monitor_id=$MonitorId;$request.control=[bool]$Control;$request.capabilities_only=[bool]$CapabilitiesOnly;$request.image_directory=$ImageDirectory
   if($ScreenActionsFile){$request.screen_actions=@([IO.File]::ReadAllText((Resolve-Path -LiteralPath $ScreenActionsFile))|ConvertFrom-Json)}
-  $request.interactive=($Operation -eq 'screen' -and -not $CapabilitiesOnly -and -not $ScreenActionsFile)
+  $request.interactive=(-not $CapabilitiesOnly -and -not $ScreenActionsFile)
  }
  function Invoke-Consumer($profile,$password){
   if($profile){
@@ -65,7 +67,7 @@ try {
     Write-Output $line
     $event=$line|ConvertFrom-Json
     if($event.ok -eq $true){$success=$true}
-    if($event.next){$answer=if($ScreenHandler){& $ScreenHandler $event}else{Read-Host 'Screen action JSON (inspect image before input), or {"action":"close"}'};if(-not $answer){$answer='{"action":"close"}'};if($answer -isnot [string]){$answer=$answer|ConvertTo-Json -Depth 8 -Compress};$inputWriter.WriteLine($answer)}
+    if($event.next){$answer=if($ScreenHandler){& $ScreenHandler $event}else{Read-Host 'Screen action JSON (settings-read or settings-set needs exact name/value; inspect image before input), or {"action":"close"}'};if(-not $answer){$answer='{"action":"close"}'};if($answer -isnot [string]){$answer=$answer|ConvertTo-Json -Depth 8 -Compress};$inputWriter.WriteLine($answer)}
    }
    if(-not $process.WaitForExit(5000)){throw 'Protected client did not exit'}
    # Do not throw inside the credential callback: PS7 can discard its pipeline output.

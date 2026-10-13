@@ -43,6 +43,11 @@ internal sealed class SupportHost : IDisposable
             lock(sync)return snapshot;
         }
     }
+    bool settingsReserved;
+    internal bool TryReserveSettings(){lock(sync){if(settingsReserved||commandGate.IsBusy||active)return false;settingsReserved=true;return true;}}
+    internal void ReleaseSettingsReservation(){lock(sync)settingsReserved=false;}
+    internal bool TryStopForSettings(){lock(lifecycle)lock(sync){if(commandGate.IsBusy||active)return false;StopCore();return true;}}
+    internal bool OperationsIdle {get{return !commandGate.IsBusy&&!screenGate.IsBusy;}}
     internal bool RelayRegistrationReady
     {
         get { lock(sync)return !relaySuspended&&relayCommandReady&&(ScreenHandler==null||relayScreenReady); }
@@ -285,6 +290,7 @@ internal sealed class SupportHost : IDisposable
         }
         if(wasReady)Publish(gen,SupportState.Reconnecting,"A relay channel disconnected; reconnecting.");
     }
+    internal Func<string> DiagnosticsHandler;
     void Serve(TcpClient c,int gen,bool relay,CancellationToken token,bool screen,bool reserved=false,Stream transport=null)
     {
         var gate=screen?screenGate:commandGate;
@@ -293,7 +299,7 @@ internal sealed class SupportHost : IDisposable
         {
             lock(sync)
             {
-                if(gen==generation&&(!relay||!relaySuspended)&&(!token.IsCancellationRequested)&&gate.TryEnter())entered=true;
+                if(!settingsReserved&&gen==generation&&(!relay||!relaySuspended)&&(!token.IsCancellationRequested)&&gate.TryEnter())entered=true;
             }
             if(!entered)
             {
@@ -322,6 +328,15 @@ internal sealed class SupportHost : IDisposable
                 if(header!="REMSUPSCREEN1")RemsupProtocol.WriteLine(stream,"REMSUPSCREEN1 ERROR wrong-channel");
                 else if(handler==null)RemsupProtocol.WriteLine(stream,"REMSUPSCREEN1 ERROR screen-disabled");
                 else handler(stream,token);
+            }
+            else if(header=="REMSUPDIAG1")
+            {
+                var handler=DiagnosticsHandler;
+                if(handler==null)RemsupProtocol.WriteLine(stream,"REMSUPDIAG1 ERROR unavailable");
+                else {
+                    try {string value=handler();if(value==null||System.Text.Encoding.UTF8.GetByteCount(value)>16384)throw new IOException();RemsupProtocol.WriteLine(stream,"REMSUPDIAG1 "+RemsupProtocol.Encode(value));}
+                    catch {RemsupProtocol.WriteLine(stream,"REMSUPDIAG1 ERROR unavailable");}
+                }
             }
             else if(header!=null&&header.StartsWith("REMSUP1 EXEC ",StringComparison.Ordinal))
             {
@@ -402,7 +417,7 @@ internal sealed class SupportHost : IDisposable
                 bool entered=false;
                 lock(sync)
                 {
-                    if(gen==generation&&lanReady&&!relaySuspended&&!token.IsCancellationRequested)entered=gate.TryEnter();
+                    if(!settingsReserved&&gen==generation&&lanReady&&!relaySuspended&&!token.IsCancellationRequested)entered=gate.TryEnter();
                 }
                 if(!entered)
                 {

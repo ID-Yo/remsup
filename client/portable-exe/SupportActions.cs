@@ -23,6 +23,7 @@ internal sealed class RemsupSettings
     public int RelayPort { get; set; }
     public string RelayPin { get; set; }
     public bool AutoUpdates { get; set; }
+    public bool AllowRemoteSettings { get; set; }
     public bool AutoStartEnabled { get; set; }
     public bool LanEnabled { get; set; }
     public string LanAddress { get; set; }
@@ -109,6 +110,7 @@ internal static class SupportActions
                 var value = line.Substring(index + 1).Trim();
                 if (key.Equals("PermanentPassword", StringComparison.OrdinalIgnoreCase)) settings.PermanentPassword = value;
                 if (key == "RelayPin") settings.RelayPin = value;
+                if (key == "AllowRemoteSettings") settings.AllowRemoteSettings = value == "True";
                 if (key == "AutoUpdates") settings.AutoUpdates = value.Equals("true", StringComparison.OrdinalIgnoreCase);
                 if (key == "LanEnabled") settings.LanEnabled = value == "True";
                 if (key == "LanAddress") settings.LanAddress = value;
@@ -153,6 +155,7 @@ internal static class SupportActions
                 "LanEnabled=" + settings.LanEnabled, "LanAddress=" + settings.LanAddress, "LanPort=" + settings.LanPort,
                 "AllowScreenView=" + settings.AllowScreenView, "AllowScreenControl=" + settings.AllowScreenControl,
                 "AutoAcceptScreenSessions=" + settings.AutoAcceptScreenSessions,
+                "AllowRemoteSettings=" + settings.AllowRemoteSettings,
                 "AutoStartEnabled=" + (settings.AutoStartEnabled ? "true" : "false")
             }, Encoding.UTF8);
         }

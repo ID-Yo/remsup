@@ -14,6 +14,10 @@ def remsup_exec_command(device_id:str,otp:str,command:str)->dict:
     if command=='fixture-busy':raise ValueError('busy PASSWORD_SENTINEL TOKEN_SENTINEL')
     return {'device_id':device_id,'exit_code':0,'truncated':False,'stdout':'fixture\nfixture\\user' if command=='hostname & whoami' else 'PASSWORD_SENTINEL TOKEN_SENTINEL','stderr':''}
 @mcp.tool()
+def remsup_diagnostics(device_id:str,otp:str)->dict:
+    if otp!='PASSWORD_SENTINEL':raise ValueError('test credential mismatch')
+    return {'schema_version':1,'status':'ok','version':'v1.48','lan':{'configured':False,'enabled':False,'ready':False,'warning':''},'relay':{'state':'RelayWaiting','ready':True},'updates':{'enabled':True,'last_check':None,'last_download':None,'last_install':None,'latest_errors':[]},'unknown':'PASSWORD_SENTINEL TOKEN_SENTINEL'}
+@mcp.tool()
 def remsup_screen_capabilities(device_id:str,otp:str)->dict:return {'available':True,'monitors':[{'monitor_id':'synthetic'}]}
 @mcp.tool()
 def remsup_screen_request(device_id:str,otp:str,monitor_id:str,control:bool)->dict:return {'session_id':'synthetic-session'}

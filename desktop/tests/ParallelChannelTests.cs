@@ -86,8 +86,9 @@ internal static class ParallelChannelTests
                 await Task.Delay(1100);await Status(peer,lease);await Task.Run(()=>peer.Call("capture"));Check(peer.Png!=null,"screenshot remains available after command");
                 await LanPolicyAndCrossGate(support,peer,lease);
                 using(var second=await Task.Run(()=>Open(port,screen:true)))Check(RemsupProtocol.ReadLine(second.GetStream(),512)=="ERR busy","second screen refused without interrupting first");
+                Check(support.TryReserveSettings(),"settings network reservation acquired while command idle");using(var blocked=await Task.Run(()=>Open(port))){Check(RemsupProtocol.ReadLine(blocked.GetStream(),512)=="OK","fixture relay pairs before receiver admission");Check(RemsupProtocol.ReadLine(blocked.GetStream(),512)=="ERR busy","settings reservation rejects new command admission");}support.ReleaseSettingsReservation();await Task.Delay(1300);await Status(peer,lease);
                 bool running=false;var longCommand=Execute(port,"ping -n 7 127.0.0.1 >nul & echo long-command",value=>{if(value=="Running")Volatile.Write(ref running,true);});
-                for(int i=0;i<100&&!Volatile.Read(ref running);i++)await Task.Delay(20);Check(running&&!longCommand.IsCompleted,"bounded long command is executing");
+                for(int i=0;i<100&&!Volatile.Read(ref running);i++)await Task.Delay(20);Check(running&&!longCommand.IsCompleted,"bounded long command is executing");Check(!support.TryReserveSettings()&&!support.TryStopForSettings()&&!longCommand.IsCompleted,"settings reservation/reconnect cannot stop an active command");
                 await Status(peer,lease);await Task.Delay(1100);await Task.Run(()=>peer.Call("capture"));Check(!longCommand.IsCompleted,"status and screenshot complete while EXEC runs");
                 using(var second=await Task.Run(()=>Open(port)))Check(RemsupProtocol.ReadLine(second.GetStream(),512)=="ERR busy","second command refused without interrupting first");
                 Check((await longCommand).ExitCode==0,"long command completes independently");await Task.Delay(1300);await Status(peer,lease);

@@ -27,6 +27,9 @@ $result=$text|ConvertFrom-Json
 if(-not ($result.argv_clean -and $result.env_clean -and $result.stdin_credentials -and $result.unicode_command)){throw 'Protected stdin consumer not proved'}
 if((Get-ChildItem $OutputRoot -File|Where-Object Extension -eq '.json'|ForEach-Object {Get-Content $_.FullName -Raw}) -match $password){throw 'Plaintext credential in output files'}
 'PASS DPAPI wrapper delivers credentials through stdin only; argv/env/output clean'
+$diag=& $fixtureWrapper -Python python -Operation diagnostics -Name fixture -DeviceId 123456789 -CredentialFile $credential -StorePath $store|ConvertFrom-Json
+if($diag.operation -ne 'diagnostics' -or -not $diag.diagnostics_command_absent){throw 'Protected diagnostics operation included a shell command'}
+'PASS diagnostics wrapper operation passes no command text'
 $explicit=& $fixtureWrapper -Python python -Operation exec -Name fixture -DeviceId 123456789 -Command 'echo explicit-port' -LocalPort 24680 -CredentialFile $credential -StorePath $store|ConvertFrom-Json
 if(-not $result.port_selection -or -not $explicit.port_selection){throw 'Automatic/explicit tunnel port selection failed'}
 $config.local_port=24680

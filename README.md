@@ -11,7 +11,7 @@ Windows x64, PowerShell 7 plus Windows PowerShell, .NET SDK from `global.json`, 
 ```powershell
 python -m venv .venv
 .venv/Scripts/python -m pip install -r mcp/requirements.txt
-./scripts/build-modern-desktop.ps1 -Publish -Version v1.48 -Output <new-absolute-output-folder>
+./scripts/build-modern-desktop.ps1 -Publish -Version v1.50 -Output <new-absolute-output-folder>
 ./scripts/ci-local.ps1 -Python <venv-python> -OutputRoot <new-absolute-ci-folder>
 ```
 
@@ -29,4 +29,8 @@ Updates use `updates.example.invalid:8444` and an all-zero placeholder pin. Set 
 
 `export-allowlist.json` enumerates every reviewed source file. `python scripts/scan-public.py` checks tracked content without printing matched credentials. Add `--review` to inventory address/version literals, device-like numbers, emails, URLs and SSH routes by location/category for manual review. Synthetic fixtures and schema/vendor URLs need contextual review. `python scripts/export-source.py <new-directory>` exports committed allowlisted blobs only, without `.git`. This scanner supplements manual review; it does not prove absence of every possible secret.
 
-No first-party open-source license has been selected. This repository must remain private pending the owner's licensing and publication review.
+Remsup source and original artwork are licensed under the [MIT License](LICENSE), copyright 2026 ID-Yo. Dependencies retain their own terms; see [third-party notices](THIRD_PARTY_NOTICES.md).
+
+## Runtime diagnostics and remote settings
+
+[Read-only runtime diagnostics](docs/architecture/runtime-diagnostics.md) reports bounded readiness and updater outcomes without credentials. [Remote ordinary settings editing](docs/architecture/remote-settings-permission.md) requires a local owner opt-in, OFF by default, and an authenticated SCREEN control lease. Permission changes, credentials, firewall and administrator actions remain local.

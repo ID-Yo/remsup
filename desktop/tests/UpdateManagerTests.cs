@@ -207,9 +207,10 @@ internal static class UpdateManagerTests
         File.WriteAllBytes(package, update);
         File.WriteAllBytes(exe, Encoding.UTF8.GetBytes("old client image"));
         using var manager = new UpdateManager(new HttpClient(new UpdateHandler(update)), "v1.25", root);
-        var handoff = new TestHandoff();
+        var handoff = new TestHandoff();bool beforeExit=false;manager.InstallOutcome=r=>beforeExit=r.Status==UpdateInstallStatus.Installed&&handoff.Completes==0;
         UpdateInstallResult result = await manager.InstallAsync(new VerifiedUpdate(package, "v1.26", Hash(update)), exe, handoff, CancellationToken.None);
         Check(result.Status == UpdateInstallStatus.Installed && File.ReadAllBytes(exe).AsSpan().SequenceEqual(update), "ready candidate was not committed");
+        Check(beforeExit,"committed diagnostic outcome must precede predecessor exit");
         Check(handoff.Suspends == 1 && handoff.Starts == 1 && handoff.Resumes == 0 && handoff.Completes == 1, "successful handoff ordering is wrong");
         Check(handoff.ReadyTimeout == TimeSpan.FromSeconds(60) && handoff.ReadyEvent.StartsWith("Local\\Remsup.Update.Ready.", StringComparison.Ordinal), "readiness signal contract is wrong");
         string[] backups = Directory.GetFiles(Path.GetDirectoryName(exe), Path.GetFileName(exe) + ".old-*", SearchOption.TopDirectoryOnly);

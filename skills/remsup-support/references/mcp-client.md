@@ -41,10 +41,14 @@ Run the final command interactively. The same process keeps the session open. Cr
 {"operation":"mouse","action":"click","x":120,"y":180,"scroll_steps":0,"frame_id":"INSPECTED_FRAME","geometry_version":2}
 {"action":"text","text":"authorized text","frame_id":"INSPECTED_FRAME","geometry_version":2}
 {"action":"key","key":"tab","frame_id":"INSPECTED_FRAME","geometry_version":2}
+{"action":"settings-read"}
+{"action":"settings-set","name":"autoUpdates","value":false}
 {"action":"close"}
 ```
 
 Frame references must match the latest capture; the server checks age/geometry/permission and input allowlists. Capture and inspect the result after input. Do not automatically replay it. `-ScreenActionsFile` accepts reviewed non-secret sequences such as capture/close, not uninspected input. `-ScreenHandler` is an audited callback for interactive next-action prompts. Keep customer PNGs private, outside Git/issues.
+
+Settings actions use the same current SCREEN session and require `can_control` plus the receiver owner's separate local opt-in for ordinary settings. `settings-read` has only the `action` field; `settings-set` has exactly `action`, `name` and a JSON bool, integer or string `value`. Only `autoUpdates`, `relayHost`, `relayPort`, `relayPin`, `lanAddress`, `lanPort` and disabling `lanEnabled` are supported. A disconnected write reports `outcome-unknown`; inspect through a new authorized session before deciding whether to write again.
 
 Errors distinguish route mismatch, no-agent, tunnel/protected endpoint and remote refusal. SDK auth/transport details are suppressed; sanitized results precede a PowerShell failure. Existing processes on a busy tunnel port are untouched. Finally closes owned tunnel and screen; on a stuck child the parent closes stdin then only its own process tree. A close failure reports that server lease remains bounded. Do not stop owner receivers/services, raise server limits or switch to plaintext.
 
