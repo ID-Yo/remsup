@@ -6,7 +6,7 @@ The ready Windows x64 app uses `91.227.77.177:443` over TLS 1.2/1.3. Its built-i
 2. On the receiving computer, run the visible app. A fresh configuration starts support using the public relay; wait for receiving readiness. Existing custom Network settings are preserved. Share the Device ID and current OTP only with the authorized operator through a protected channel.
 3. On the operator computer, run the same app. Enter that Device ID, use Default in Quick options, Connect and provide the protected pairing password. Default follows Settings > Network. Check the device identity before authorized maintenance; commands have time/output limits.
 4. Review receiving Settings > Security before sharing credentials. Existing defaults allow screen viewing/control and automatic screen approval after pairing. Disable automatic approval if each screen session must be approved locally. Remote settings editing is OFF unless the local owner enables it. Device passwords authorize commands without a separate per-command receiver prompt.
-5. Stop support when the task ends and use tray Exit to close the app. The window X may hide it to the tray. Startup is an optional visible current-user setting; no hidden Windows service or automatic elevation is added.
+5. Use tray Exit when the task ends; it stops receiving support and closes the app. There are no receiving Start/Stop buttons in this modern app. The window X, Alt+F4 and minimize keep it running in the visible tray. Startup is an optional visible current-user setting; no hidden Windows service or automatic elevation is added.
 
 ## Separate services
 
