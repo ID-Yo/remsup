@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#172b35">
+  <title>Remsup — visible Windows remote support</title>
+  <meta name="description" content="Visible Windows remote support for authorized maintenance. Bounded commands, screen viewing and control, and authenticated MCP tools for AI operators.">
+  <link rel="canonical" href="https://remsup.me/">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Remsup — visible Windows remote support">
+  <meta property="og:description" content="Windows support for people and AI operators, with visible controls and device-owner authorization.">
+  <meta property="og:url" content="https://remsup.me/">
+  <link rel="icon" href="assets/remsup.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <a class="skip" href="#main">Skip to content</a>
+  <header class="shell masthead">
+    <a class="brand" href="./" aria-label="Remsup home"><img src="assets/remsup.svg" width="36" height="36" alt=""><span>Remsup</span></a>
+    <nav aria-label="Main navigation">
+      <a href="#how-it-works">How it works</a>
+      <a href="https://github.com/ID-Yo/remsup/tree/main/docs">Docs</a>
+      <a class="nav-source" href="https://github.com/ID-Yo/remsup">GitHub <span aria-hidden="true">↗</span></a>
+    </nav>
+  </header>
+  <main id="main" tabindex="-1">
+    <section class="shell hero" aria-labelledby="hero-title">
+      <div class="hero-copy">
+        <p class="eyebrow"><span class="square" aria-hidden="true"></span> Windows remote support</p>
+        <h1 id="hero-title">Remote support.<br><em>Human permission.</em></h1>
+        <p class="intro">A visible Windows app for authorized maintenance. Connect a support operator or an AI agent, with controls that stay in the device owner’s hands.</p>
+        <div class="actions">
+          <a class="button primary" href="https://github.com/ID-Yo/remsup">Explore the source <span aria-hidden="true">↗</span></a>
+          <a class="text-link" href="https://github.com/ID-Yo/remsup/blob/main/docs/usage/README.md">Read the setup guide <span aria-hidden="true">→</span></a>
+        </div>
+        <p class="hero-meta">MIT licensed <span aria-hidden="true">/</span> Windows x64 <span aria-hidden="true">/</span> MCP integration</p>
+      </div>
+      <figure class="connection">
+        <div class="diagram-top"><span class="eyebrow">The support connection</span><span class="diagram-index" aria-hidden="true">01 — 02</span></div>
+        <div class="endpoint owner">
+          <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true"><rect x="3" y="5" width="26" height="18" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="M10 28h12M16 23v5" stroke="currentColor" stroke-width="1.5"/></svg>
+          <div><span class="endpoint-label">01 / Device owner</span><strong>Visible Windows app</strong></div>
+        </div>
+        <div class="connection-line"><span>Authorized session</span><span class="route">Configured relay or direct LAN</span></div>
+        <div class="endpoint operator">
+          <svg width="32" height="32" viewBox="0 0 32 32" fill="none" aria-hidden="true"><rect x="3" y="5" width="26" height="22" rx="2" stroke="currentColor" stroke-width="1.5"/><path d="m8 12 4 4-4 4m8 0h7" stroke="currentColor" stroke-width="1.5"/></svg>
+          <div><span class="endpoint-label">02 / Support operator</span><strong>Person or AI agent</strong></div>
+        </div>
+        <div class="diagram-controls"><span>Commands</span><span>Screen</span><span>MCP tools</span></div>
+        <figcaption>Connection overview. Infrastructure and access are configured by your administrator.</figcaption>
+      </figure>
+    </section>
+
+    <section class="shell capabilities" id="how-it-works" aria-labelledby="capabilities-title">
+      <div class="section-heading"><p class="eyebrow">Built for support</p><h2 id="capabilities-title">A clear task. A visible session.</h2></div>
+      <div class="capability-grid">
+        <article><span class="number" aria-hidden="true">01</span><h3>Run maintenance commands</h3><p>Authorized operators send bounded commands and receive results with execution time and output limits.</p></article>
+        <article><span class="number" aria-hidden="true">02</span><h3>View and control the screen</h3><p>Screen capture, mouse and keyboard control follow the receiving device’s settings, consent policy and session expiry.</p></article>
+        <article><span class="number" aria-hidden="true">03</span><h3>Keep local controls close</h3><p>The owner can stop support and exit from the tray. Unattended access requires explicit device-owner authorization.</p></article>
+      </div>
+    </section>
+
+    <section class="agent-section" aria-labelledby="agent-title">
+      <div class="shell agent-grid">
+        <div><p class="eyebrow">For AI operators</p><h2 id="agent-title">Your agent.<br>A defined support task.</h2><p>Remsup exposes authenticated MCP tools for authorized support work. Connect your agent to an administrator-provisioned endpoint and use the support skill to follow the documented workflow.</p><a class="text-link light" href="https://github.com/ID-Yo/remsup/blob/main/skills/remsup-support/SKILL.md">Explore the operator skill <span aria-hidden="true">→</span></a></div>
+        <ol class="agent-steps">
+          <li><span class="step-tag">Authorize</span><p>Agree on the device and the maintenance task.</p></li>
+          <li><span class="step-tag">Connect</span><p>Use configured infrastructure and protected credentials.</p></li>
+          <li><span class="step-tag">Verify</span><p>Check command results and close screen sessions when finished.</p></li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="shell setup" aria-labelledby="setup-title">
+      <div class="setup-intro"><p class="eyebrow">Before your first session</p><h2 id="setup-title">Read the setup.<br>Set the boundaries.</h2><p>This is a source distribution for controlled testing. Bring your own configured infrastructure and review the security model before use.</p><a class="text-link" href="https://github.com/ID-Yo/remsup/blob/main/SECURITY.md">Read the security notes <span aria-hidden="true">→</span></a></div>
+      <div class="questions">
+        <details open><summary>What do I need to run Remsup?</summary><p>Windows x64 and the separately installed Evergreen WebView2 Runtime. Build the single Windows EXE from source using the prerequisites in the README. No hosted relay, update service or release executable is supplied with the source snapshot.</p><a href="https://github.com/ID-Yo/remsup#build-and-test">Build prerequisites <span aria-hidden="true">↗</span></a></details>
+        <details><summary>Does closing the window end support?</summary><p>No. Closing or minimizing the window can keep support running in the tray. Use Stop support to end receiving support, or tray Exit to close the application.</p></details>
+        <details><summary>How does owner consent work?</summary><p>Work requires device-owner authorization. Screen access follows the receiving device’s settings; automatic approval after pairing can be enabled. Do not assume every command or screen action prompts the owner. Windows administrator elevation remains a local owner action.</p></details>
+        <details><summary>Can an operator change Remsup settings?</summary><p>Remote editing of ordinary settings is OFF by default. It requires local owner opt-in and an authenticated screen-control session, and is limited to specified settings. Permission changes, credentials, firewall and administrator actions remain local.</p><a href="https://github.com/ID-Yo/remsup/blob/main/docs/architecture/remote-settings-permission.md">Permission details <span aria-hidden="true">↗</span></a></details>
+        <details><summary>What should I know about the security model?</summary><p>Windows relay and LAN connections use TLS with a verified certificate pin. The relay administrator can inspect relayed data; this is not end-to-end encryption. The source snapshot is not production security approval. Review the security documentation and provision your own endpoints.</p></details>
+      </div>
+    </section>
+  </main>
+  <footer class="shell footer"><a class="brand" href="./" aria-label="Remsup home"><img src="assets/remsup.svg" width="28" height="28" alt=""><span>Remsup</span></a><p>Visible support. Explicit authorization.</p><nav aria-label="Footer navigation"><a href="https://github.com/ID-Yo/remsup">Source</a><a href="https://github.com/ID-Yo/remsup/tree/main/docs">Docs</a><a href="https://github.com/ID-Yo/remsup/blob/main/LICENSE">MIT license</a></nav></footer>
+</body>
+</html>
