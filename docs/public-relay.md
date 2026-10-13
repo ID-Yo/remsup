@@ -16,7 +16,7 @@ Automatic updates are OFF by default. This public-relay candidate has no approve
 
 ## Self-hosting and limits
 
-You can select a custom TLS relay and verified pin in Settings > Network. The C backend must stay private behind a TLS terminator; see [architecture](architecture.md) and [stunnel example](../relay/stunnel/remsup.conf.example). v1.50 remains the earlier self-hosted distribution.
+You can select a custom TLS relay and verified pin in Settings > Network. The C backend must stay private behind a TLS terminator; see [architecture](architecture.md) and [stunnel example](../relay/stunnel/remsup.conf). v1.50 remains the earlier self-hosted distribution.
 
 TLS protects each connection to the relay. Relay administrators can inspect pairing credentials and command/screen traffic; this is not end-to-end encryption. The protocol-key shape filter is not authentication. Malformed headers/keys cause a temporary IP block after more than three bad attempts; comprehensive abuse quotas, enrollment and revocation are not provided by this MVP. Availability has no service-level guarantee.
 
