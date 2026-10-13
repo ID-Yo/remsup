@@ -2,7 +2,9 @@
 
 Visible Windows remote support for explicitly authorized maintenance. The receiver can stop support and exit from the tray. Commands have time and output bounds. Screen viewing/control follows the receiving user's settings and consent policy. No hidden service, automatic elevation or endpoint security bypass is provided.
 
-This source snapshot is prepared for review. It ships no credentials, relay service or release executable. Use only devices and infrastructure you are authorized to administer. Relay operators can see relayed credentials and command data; this is a controlled-test product, not a claim of production security.
+The v1.51 experimental Windows app uses the public Remsup TLS relay by default. Anyone may use this relay for support explicitly authorized by the device owner. No account, MCP token or device credential is included. Relay administrators can see relayed credentials and command data; this is not a claim of production security or end-to-end encryption.
+
+Download the reviewed ready app from [GitHub Releases](https://github.com/ID-Yo/remsup/releases), verify its SHA256SUMS, and run the EXE on Windows x64 with the Evergreen WebView2 Runtime installed. SDK, Node and Python are needed only for source builds or separate MCP tooling. See [public relay setup](docs/public-relay.md). v1.50 remains the separate self-hosted experimental distribution.
 
 ## Build and test
 
@@ -11,7 +13,7 @@ Windows x64, PowerShell 7 plus Windows PowerShell, .NET SDK from `global.json`, 
 ```powershell
 python -m venv .venv
 .venv/Scripts/python -m pip install -r mcp/requirements.txt
-./scripts/build-modern-desktop.ps1 -Publish -Version v1.50 -Output <new-absolute-output-folder>
+./scripts/build-modern-desktop.ps1 -Publish -Version v1.51 -Output <new-absolute-output-folder>
 ./scripts/ci-local.ps1 -Python <venv-python> -OutputRoot <new-absolute-ci-folder>
 ```
 
@@ -21,9 +23,9 @@ The icon is generated locally from `assets/remsup.svg`; the checkout contains no
 
 ## Configuration
 
-The default relay is the reserved `relay.example.invalid`, with an all-zero placeholder pin that is not a certificate trust anchor. Configure a real relay and verified SPKI SHA256 pin in Settings > Network. Packagers may provision `REMSUP_RELAY_HOST` and `REMSUP_RELAY_PIN` before starting the process. Port 443 is the default; the Settings port is configurable. No production endpoint is built in.
+The default relay is `91.227.77.177:443`, pinned to SPKI SHA256 `b826918726ce38a6825ad8ea9df38180dad007a9d724673d6df6a5d3efe8d0f4`. These are public routing/trust metadata, not credentials. No manual relay setup is needed on a fresh v1.51 app. Existing saved custom endpoints and pins remain unchanged. Settings > Network can select your own verified TLS relay. Administrators may provision `REMSUP_RELAY_HOST` and `REMSUP_RELAY_PIN` together before startup; process-only environment overrides do not persist after login.
 
-Updates use `updates.example.invalid:8444` and an all-zero placeholder pin. Set `REMSUP_UPDATE_HOST`, `REMSUP_UPDATE_PORT` and `REMSUP_UPDATE_PIN` to an administrator-provisioned pinned HTTPS service before startup, or disable automatic checks in Settings. The updater accepts only fixed release resources, validates hashes and uses a rollback-capable single-EXE handoff. No update service or release is supplied here.
+Automatic updates default to OFF. The app makes no update network request without an administrator-provisioned `REMSUP_UPDATE_HOST` and `REMSUP_UPDATE_PIN`; `REMSUP_UPDATE_PORT` defaults to 8444. The current public relay does not establish an approved update channel for this artifact. Download new releases manually. Existing explicit update preferences are preserved, but an unconfigured channel remains disabled. The existing fixed-resource, hash verification, stable per-user installation and rollback handoff mechanics remain available for separately configured deployments.
 
 ## Source export
 

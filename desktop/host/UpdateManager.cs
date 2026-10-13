@@ -110,6 +110,7 @@ internal sealed class UpdateManager : IDisposable
     internal static readonly string UpdateHost = Environment.GetEnvironmentVariable("REMSUP_UPDATE_HOST") ?? "updates.example.invalid";
     internal static readonly int UpdatePort = int.Parse(Environment.GetEnvironmentVariable("REMSUP_UPDATE_PORT") ?? "8444");
     internal static readonly string UpdatePin = Environment.GetEnvironmentVariable("REMSUP_UPDATE_PIN") ?? "0000000000000000000000000000000000000000000000000000000000000000";
+    internal static bool IsConfigured => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("REMSUP_UPDATE_HOST")) && !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("REMSUP_UPDATE_PIN"));
     internal static string BaseUrl => new UriBuilder("https", UpdateHost, UpdatePort).Uri.AbsoluteUri;
     internal static string ManifestUrl => BaseUrl + "latest.json";
     internal static string ChecksumsUrl => BaseUrl + "SHA256SUMS.txt";

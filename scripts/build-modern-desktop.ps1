@@ -1,4 +1,4 @@
-param([string]$Dotnet='dotnet',[string]$Output,[switch]$Publish,[string]$Version='v1.50')
+param([string]$Dotnet='dotnet',[string]$Output,[switch]$Publish,[string]$Version='v1.51')
 $ErrorActionPreference='Stop'
 $root=Split-Path -Parent $PSScriptRoot
 if($Version -notmatch '^v1\.\d+$'){throw 'Review version must use v1.N'}

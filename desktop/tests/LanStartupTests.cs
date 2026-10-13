@@ -49,7 +49,7 @@ internal static class LanStartupTests {
    Check(diagnostic.GetProperty("lan").GetProperty("enabled").GetBoolean()&&!diagnostic.GetProperty("lan").GetProperty("ready").GetBoolean()&&diagnostic.GetProperty("lan").GetProperty("warning").GetString().Contains("inactive"),"diagnostic wire distinguishes configured unavailable LAN from ready relay");
    var registrationDeadline=DateTime.UtcNow.AddSeconds(8);while(JsonSerializer.SerializeToElement(host.Snapshot()).GetProperty("receivingState").GetString()!="RelayWaiting"&&DateTime.UtcNow<registrationDeadline)await Task.Delay(100);
    var result=await Task.Run(()=>OperatorConnection.ExecuteFixture("127.0.0.1",relay.Port,"111222333","fixture-password","echo relay-with-stale-lan",5,1024,CancellationToken.None,null));Check(result.ExitCode==0&&result.Stdout.Contains("relay-with-stale-lan"),"real relay command succeeds with stale LAN settings");
-   await host.HandleAsync("settings.save",Payload(new{relayHost="relay.example.invalid",relayPort=443,relayPin="",autoUpdates=true,autoStart=false,lanEnabled=true,lanAddress="192.0.2.253",lanPort=8444,allowScreenView=true,allowScreenControl=true,autoAcceptScreenSessions=true}));
+   await host.HandleAsync("settings.save",Payload(new{relayHost="91.227.77.177",relayPort=443,relayPin="",autoUpdates=true,autoStart=false,lanEnabled=true,lanAddress="192.0.2.253",lanPort=8444,allowScreenView=true,allowScreenControl=true,autoAcceptScreenSessions=true}));
    state=JsonSerializer.SerializeToElement(host.Snapshot());Check(state.GetProperty("settings").GetProperty("lanEnabled").GetBoolean()&&state.GetProperty("settings").GetProperty("lanAddress").GetString()=="192.0.2.253","LAN opt-in/draft saved without blocking relay or changing Windows network");
    using var reopened=new HostController(new HostOptions(new[]{"--fixture-root",args[0]}),new Dialogs());Check(JsonSerializer.SerializeToElement(reopened.Snapshot()).GetProperty("settings").GetProperty("lanEnabled").GetBoolean(),"unavailable LAN preference remains saved after reopen");
   }catch(Exception ex){Console.Error.WriteLine(ex);Environment.ExitCode=1;}finally{app.Shutdown();}
@@ -74,7 +74,7 @@ internal static class LanStartupTests {
   string folder=Path.Combine(root,"disabled-lan-save");Directory.CreateDirectory(folder);using var relay=new SyntheticPairingRelay("fixture-password");
   using var host=new HostController(new HostOptions(new[]{"--fixture-root",folder,"--fixture-relay","127.0.0.1:"+relay.Port}),new Dialogs());await host.ReadyAsync();await Task.Delay(500);
   var command=Task.Run(()=>OperatorConnection.ExecuteFixture("127.0.0.1",relay.Port,"111222333","fixture-password","powershell -NoProfile -Command \"Start-Sleep -Milliseconds 1400; Write-Output stable-startup-save\"",5,1024,CancellationToken.None,null));await Task.Delay(350);
-  await host.HandleAsync("settings.save",Payload(new{relayHost="relay.example.invalid",relayPort=443,relayPin="",autoUpdates=true,autoStart=true,lanEnabled=false,lanAddress="192.168.250.2",lanPort=8445,allowScreenView=true,allowScreenControl=true,autoAcceptScreenSessions=true}));
+  await host.HandleAsync("settings.save",Payload(new{relayHost="91.227.77.177",relayPort=443,relayPin="",autoUpdates=true,autoStart=true,lanEnabled=false,lanAddress="192.168.250.2",lanPort=8445,allowScreenView=true,allowScreenControl=true,autoAcceptScreenSessions=true}));
   var result=await command;Check(result.ExitCode==0&&result.Stdout.Contains("stable-startup-save"),"General startup Save with disabled LAN draft preserves the active command");
  }
 }
