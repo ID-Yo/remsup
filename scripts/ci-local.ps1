@@ -31,7 +31,7 @@ try{
   Native 'wsl.exe' ($arguments+@('--cd',$root,'--exec','python3','tests/relay/test_relay.py'))
  }
  Step 'windows-core-vault' {Native 'powershell.exe' @('-NoProfile','-File','scripts/test-windows.ps1')}
- Step 'windows-build' {Native 'powershell.exe' @('-NoProfile','-File','scripts/build-release.ps1','-Version','v1.50','-Output',(Join-Path $OutputRoot 'windows-build'))}
+ Step 'windows-build' {Native 'powershell.exe' @('-NoProfile','-File','scripts/build-release.ps1','-Version','v1.51','-Output',(Join-Path $OutputRoot 'windows-build'))}
  Step 'mcp-dependencies' {Native $pythonPath @('-m','pip','install','-r','mcp/requirements.txt')}
  Step 'mcp-contracts' {Native $pythonPath @('-B','-m','unittest','discover','-s','tests/mcp','-v')}
  Step 'operator-wrapper-PS5-PS7' {Native 'powershell.exe' @('-NoProfile','-File','tests/mcp/test-operator-wrapper.ps1','-OutputRoot',(Join-Path $OutputRoot 'wrapper'))}

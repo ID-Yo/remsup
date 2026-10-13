@@ -33,7 +33,7 @@ internal sealed class RemsupSettings
     {
         PermanentPassword = "";
         RelayHost = "";
-        RelayPin = ""; AutoUpdates = true; RelayPort = 443; LanPort = 8444; LanAddress = "";
+        RelayPin = ""; AutoUpdates = false; RelayPort = 443; LanPort = 8444; LanAddress = "";
         AutoStartEnabled = false;
         AllowScreenView = true; AllowScreenControl = true;
         AutoAcceptScreenSessions = true;

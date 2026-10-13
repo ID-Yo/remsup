@@ -13,8 +13,8 @@ using System.Net.Http;
 
 internal static class RelayTls
 {
-    internal static readonly string DefaultPin = Environment.GetEnvironmentVariable("REMSUP_RELAY_PIN") ?? "0000000000000000000000000000000000000000000000000000000000000000";
-    internal static readonly string DefaultHost = Environment.GetEnvironmentVariable("REMSUP_RELAY_HOST") ?? "relay.example.invalid";
+    internal static readonly string DefaultPin = Environment.GetEnvironmentVariable("REMSUP_RELAY_PIN") ?? "b826918726ce38a6825ad8ea9df38180dad007a9d724673d6df6a5d3efe8d0f4";
+    internal static readonly string DefaultHost = Environment.GetEnvironmentVariable("REMSUP_RELAY_HOST") ?? "91.227.77.177";
     internal const int DefaultPort = 443;
     const SslProtocols Tls13 = (SslProtocols)12288;
     const SslProtocols AllowedProtocols = SslProtocols.Tls12 | Tls13;

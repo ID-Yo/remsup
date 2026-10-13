@@ -125,6 +125,7 @@
   "docs/usage/03-agent-guide.md",
   "docs/usage/04-troubleshooting.md",
   "docs/usage/AGENTS.md",
+  "docs/public-relay.md",
   "docs/usage/README.md",
   "export-allowlist.json",
   "global.json",

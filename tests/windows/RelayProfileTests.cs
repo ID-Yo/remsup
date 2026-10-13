@@ -42,22 +42,22 @@ internal static class RelayProfileTests {
  }
  static void CheckOwnerDefaults(string root){
   foreach(var lines in new[]{new string[0],new[]{"PermanentPassword=synthetic"},new[]{"RelayHost=","RelayPort=443"},new[]{"RelayHost=   ","RelayPort="}}){
-   var relay=RelayConfiguration.Parse(lines);Check(relay.Host=="relay.example.invalid"&&relay.Port==443&&relay.Pin==RelayTls.DefaultPin,"fresh/missing/blank relay uses configured relay default");
+   var relay=RelayConfiguration.Parse(lines);Check(relay.Host==RelayTls.DefaultHost&&relay.Port==443&&relay.Pin==RelayTls.DefaultPin,"fresh/missing/blank relay uses configured relay default");
   }
-  var migrated=RelayConfiguration.Parse(new[]{"RelayHost=relay.example.invalid","RelayPort=8443"});Check(migrated.Port==443&&migrated.Pin==RelayTls.DefaultPin,"saved owner endpoint migrates to TLS 443 and default pin");
+  var migrated=RelayConfiguration.Parse(new[]{"RelayHost="+RelayTls.DefaultHost,"RelayPort=8443"});Check(migrated.Port==443&&migrated.Pin==RelayTls.DefaultPin,"saved owner endpoint migrates to TLS 443 and default pin");
   var changed=RelayConfiguration.Parse(new[]{"RelayHost=custom.example.test","RelayPort=10443"});Check(changed.Host=="custom.example.test"&&changed.Port==10443,"explicit global host/custom port preserved");
-  changed=RelayConfiguration.Parse(new[]{"RelayHost=","RelayPort=10443"});Check(changed.Host=="relay.example.invalid"&&changed.Port==10443,"blank host preserves explicit valid port");
+  changed=RelayConfiguration.Parse(new[]{"RelayHost=","RelayPort=10443"});Check(changed.Host==RelayTls.DefaultHost&&changed.Port==10443,"blank host preserves explicit valid port");
   changed=RelayConfiguration.Parse(new[]{"RelayHost=custom.example.test"});Check(changed.Host=="custom.example.test"&&changed.Port==443,"missing port gets TLS default");
   changed=RelayConfiguration.Parse(new[]{"RelayHost=custom.example.test","RelayPin="});Check(changed.Host=="custom.example.test"&&changed.Pin=="","custom relay does not inherit owner pin");
-  changed=RelayConfiguration.Parse(new[]{"RelayPort=broken"});Check(changed.Host=="relay.example.invalid"&&changed.Port==0,"malformed explicit port never replaced");
-  var path=Path.Combine(root,"missing-settings.txt");var settings=SupportActions.LoadSettings(path);Check(settings.RelayHost=="relay.example.invalid"&&settings.RelayPort==443&&settings.RelayPin==RelayTls.DefaultPin&&!File.Exists(path),"fresh receiving/settings values without disk mutation");
+  changed=RelayConfiguration.Parse(new[]{"RelayPort=broken"});Check(changed.Host==RelayTls.DefaultHost&&changed.Port==0,"malformed explicit port never replaced");
+  var path=Path.Combine(root,"missing-settings.txt");var settings=SupportActions.LoadSettings(path);Check(settings.RelayHost==RelayTls.DefaultHost&&settings.RelayPort==443&&settings.RelayPin==RelayTls.DefaultPin&&!File.Exists(path),"fresh receiving/settings values without disk mutation");
   foreach(var lines in new[]{new[]{"RelayHost=","RelayPort=443"},new[]{"RelayHost=custom.example.test","RelayPort=10443","RelayPin="+RelayTls.DefaultPin},new[]{"RelayHost=custom.example.test","RelayPort="}}){
    File.WriteAllLines(path,lines);var before=File.ReadAllBytes(path);settings=SupportActions.LoadSettings(path);var relay=RelayConfiguration.Parse(lines);
    Check(settings.RelayHost==relay.Host&&settings.RelayPort==relay.Port,"receiving and profile share effective policy");Check(Convert.ToBase64String(before)==Convert.ToBase64String(File.ReadAllBytes(path)),"effective defaults do not write settings");
   }
   settings=SupportActions.LoadSettings(Path.Combine(root,"never-created.txt"));using(var dialog=new RemsupSettingsForm(settings)){
    var flags=System.Reflection.BindingFlags.Instance|System.Reflection.BindingFlags.NonPublic;
-   Check(((System.Windows.Forms.TextBox)typeof(RemsupSettingsForm).GetField("relayHostBox",flags).GetValue(dialog)).Text=="relay.example.invalid","Settings displays effective default host");
+   Check(((System.Windows.Forms.TextBox)typeof(RemsupSettingsForm).GetField("relayHostBox",flags).GetValue(dialog)).Text==RelayTls.DefaultHost,"Settings displays effective default host");
    Check(((System.Windows.Forms.TextBox)typeof(RemsupSettingsForm).GetField("relayPortBox",flags).GetValue(dialog)).Text=="443","Settings displays effective default port");
    Check(((System.Windows.Forms.TextBox)typeof(RemsupSettingsForm).GetField("relayHostBox",flags).GetValue(dialog)).Enabled&&!((System.Windows.Forms.TextBox)typeof(RemsupSettingsForm).GetField("relayHostBox",flags).GetValue(dialog)).ReadOnly,"effective relay remains editable");
   }

@@ -43,11 +43,11 @@ internal static class CurrentStoreTests {
      if(step==0){Check(Field<DeviceStoreSnapshot>(form,"data")!=null,"GUI has valid empty current store");step=1;FindButton(form,"Add device").PerformClick();}
      else if(step==1){var editor=Application.OpenForms.OfType<DeviceEditorForm>().FirstOrDefault();if(editor==null)return;
       Field<TextBox>(editor,"name").Text="New review workstation";Field<TextBox>(editor,"id").Text="123456789";
-      Check(Field<Label>(editor,"defaultEndpoint").Text.Contains("relay.example.invalid:443"),"actual Add dialog shows configured default");
+      Check(Field<Label>(editor,"defaultEndpoint").Text.Contains(RelayTls.DefaultHost+":443"),"actual Add dialog shows configured default");
       if(!string.IsNullOrEmpty(evidence)){Directory.CreateDirectory(evidence);FriendlyUiTests.Capture(editor,Path.Combine(evidence,"current-store-"+(legacy?"legacy":"fresh")+"-"+(dark?"dark":"light")+"-editor.png"));}
       step=2;FindButton(editor,"Save").PerformClick();
      }else{
-      var rows=Field<ListView>(form,"devices");Check(rows.Items.Count==1&&((DeviceRecord)rows.Items[0].Tag).UseDefaultRelay&&DeviceEndpoint.Resolve((DeviceRecord)rows.Items[0].Tag,()=>relay).Display=="relay.example.invalid:443","native saved card has effective default");
+      var rows=Field<ListView>(form,"devices");Check(rows.Items.Count==1&&((DeviceRecord)rows.Items[0].Tag).UseDefaultRelay&&DeviceEndpoint.Resolve((DeviceRecord)rows.Items[0].Tag,()=>relay).Display==RelayTls.DefaultHost+":443","native saved card has effective default");
       var saved=store.Load().Records;Check(saved.Count==1&&saved[0].UseDefaultRelay&&saved[0].Host==""&&saved[0].Port==0&&!saved[0].SavePermanentPassword,"GUI save/reopen retains mode without endpoint/OTP snapshot");
       if(!string.IsNullOrEmpty(evidence))FriendlyUiTests.Capture(form,Path.Combine(evidence,"current-store-"+(legacy?"legacy":"fresh")+"-"+(dark?"dark":"light")+"-saved.png"));
       if(legacy)Check(File.ReadAllText(old)=="{\"version\":1,\"revision\":0,\"records\":[]}","GUI leaves old v1 untouched");timer.Stop();form.Close();
