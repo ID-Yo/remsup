@@ -92,11 +92,11 @@ def exec_command_over_relay(
 ) -> dict:
     started_sock = open_operator_socket(relay_host, relay_port, device_id, otp)
     with started_sock:
-        started_sock.settimeout(timeout_seconds + 10)
+        started_sock.settimeout(timeout_seconds + 30)
         command_b64 = base64.b64encode(command.encode("utf-8")).decode("ascii")
         header = f"REMSUP1 EXEC {timeout_seconds} {max_output_bytes} {command_b64}\n"
         started_sock.sendall(header.encode("ascii"))
-        response = recv_line(started_sock)
+        response = _recv_bounded_line(started_sock, ((max_output_bytes + 2) // 3) * 4 + 1024, timeout_seconds + 30).decode('ascii', errors='replace')
 
     parts = response.split(" ", 6)
     if len(parts) >= 3 and parts[0] == "REMSUP1" and parts[1] == "ERROR":

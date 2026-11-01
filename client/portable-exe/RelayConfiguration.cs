@@ -6,7 +6,7 @@ internal sealed class RelayConfiguration {
  internal readonly string Host;
  internal readonly int Port;
  internal readonly string Pin;
- internal static readonly string DefaultHost=RelayTls.DefaultHost;
+ internal const string DefaultHost="91.227.77.177";
  internal const int DefaultPort=443;
  internal RelayConfiguration(string host,int port,string pin=null){Host=host;Port=port;Pin=pin??"";}
  internal const string Help="Configure a relay server, TLS port and public-key pin in Settings > Network. Device ID is not a server address.";

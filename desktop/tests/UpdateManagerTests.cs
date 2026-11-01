@@ -108,6 +108,7 @@ internal static class UpdateManagerTests
             await VerifyStableInstallAndRotation(root);
             await VerifyFailedCandidateRollsBack(root);
             await VerifyBusyInstallPreservesVerifiedPackage(root);
+            await VerifyRuntimePackageStagingAndRollback(root);
             VerifyLockedCleanupAndStartup(root);
             Console.WriteLine("Updater manifest, TLS resource allowlist, SHA256 verification, install handoff and rollback PASS");
         }
@@ -152,9 +153,9 @@ internal static class UpdateManagerTests
         VerifiedUpdate downloaded = await manager.DownloadAsync(check.Release, CancellationToken.None);
         Check(File.ReadAllBytes(downloaded.Path).AsSpan().SequenceEqual(exe), "verified package bytes differ");
         Check(downloaded.Sha256 == Hash(exe), "verified package hash differs");
-        Check(handler.Paths.Count == 3 && handler.Paths[0] == "https://updates.example.invalid:8444/latest.json" &&
-              handler.Paths[1] == "https://updates.example.invalid:8444/SHA256SUMS.txt" &&
-              handler.Paths[2] == "https://updates.example.invalid:8444/RemsupDesktop_v1.26.exe", "updater requested a non-fixed resource");
+        Check(handler.Paths.Count == 3 && handler.Paths[0] == "https://91.227.77.177:8444/latest.json" &&
+              handler.Paths[1] == "https://91.227.77.177:8444/SHA256SUMS.txt" &&
+              handler.Paths[2] == "https://91.227.77.177:8444/RemsupDesktop_v1.26.exe", "updater requested a non-fixed resource");
 
         var currentHandler = new UpdateHandler(exe) { Version = "v1.25", Filename = "RemsupDesktop_v1.25.exe" };
         using var currentClient = new HttpClient(currentHandler);
@@ -268,5 +269,112 @@ internal static class UpdateManagerTests
         UpdateInstallResult result = await manager.InstallAsync(new VerifiedUpdate(package, "v1.26", Hash(update)), exe, handoff, CancellationToken.None);
         Check(result.Status == UpdateInstallStatus.Deferred && File.Exists(package), "busy device discarded its downloaded update");
         Check(File.ReadAllBytes(exe).AsSpan().SequenceEqual(old) && handoff.Starts == 0 && handoff.Resumes == 0 && handoff.Completes == 0, "busy device changed its active executable or registrations");
+    }
+
+    static async Task VerifyRuntimePackageStagingAndRollback(string root)
+    {
+        string packageDir = Path.Combine(root, "runtime-pkg");
+        Directory.CreateDirectory(packageDir);
+        string packageExe = Path.Combine(packageDir, "RemsupDesktop.exe");
+        byte[] pkgBytes = Encoding.UTF8.GetBytes("new client package");
+        File.WriteAllBytes(packageExe, pkgBytes);
+
+        string pkgRuntimes = Path.Combine(packageDir, "runtimes", "webview2");
+        Directory.CreateDirectory(pkgRuntimes);
+        string pkgMain = Path.Combine(pkgRuntimes, "msedgewebview2.exe");
+        File.WriteAllText(pkgMain, "new webview2 runtime");
+        string pkgManifest = System.Text.Json.JsonSerializer.Serialize(new RuntimeManifest {
+            schema = "remsup-runtime-v1",
+            version = "155.0.4283.45",
+            files = new List<RuntimeFileEntry> {
+                new RuntimeFileEntry { path = "msedgewebview2.exe", sha256 = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("new webview2 runtime"))).ToLowerInvariant() }
+            }
+        });
+        File.WriteAllText(Path.Combine(pkgRuntimes, UserInstallation.RuntimeManifestName), pkgManifest);
+
+        string installDir = Path.Combine(root, "app-installed");
+        Directory.CreateDirectory(installDir);
+        string installExe = Path.Combine(installDir, "Remsup.exe");
+        byte[] oldBytes = Encoding.UTF8.GetBytes("old client executable");
+        File.WriteAllBytes(installExe, oldBytes);
+
+        string oldRuntimes = Path.Combine(installDir, "runtimes", "webview2");
+        Directory.CreateDirectory(oldRuntimes);
+        string oldMain = Path.Combine(oldRuntimes, "msedgewebview2.exe");
+        File.WriteAllText(oldMain, "old webview2 runtime");
+        string oldUserDoc = Path.Combine(oldRuntimes, "preserved-user-note.txt");
+        File.WriteAllText(oldUserDoc, "user data to preserve");
+        string oldManifest = System.Text.Json.JsonSerializer.Serialize(new RuntimeManifest {
+            schema = "remsup-runtime-v1",
+            version = "155.0.4283.45",
+            files = new List<RuntimeFileEntry> {
+                new RuntimeFileEntry { path = "msedgewebview2.exe", sha256 = Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes("old webview2 runtime"))).ToLowerInvariant() }
+            }
+        });
+        File.WriteAllText(Path.Combine(oldRuntimes, UserInstallation.RuntimeManifestName), oldManifest);
+
+        string pkgManifestSha = Hash(File.ReadAllBytes(Path.Combine(pkgRuntimes, UserInstallation.RuntimeManifestName)));
+
+        // Case 1: Candidate fails readiness -> rolls back both EXE and runtime!
+        using var manager = new UpdateManager(new HttpClient(new UpdateHandler(pkgBytes)), "v1.25", root);
+        var handoffFailed = new TestHandoff { CandidateReady = false };
+        UpdateInstallResult resultFail = await manager.InstallAsync(
+            new VerifiedUpdate(packageExe, "v1.26", Hash(pkgBytes), runtimeVersion: "155.0.4283.45", runtimeSha256: pkgManifestSha),
+            installExe,
+            handoffFailed,
+            CancellationToken.None);
+
+        Check(resultFail.Status == UpdateInstallStatus.RolledBack, "failed candidate did not roll back");
+        Check(File.ReadAllBytes(installExe).AsSpan().SequenceEqual(oldBytes), "failed candidate did not restore old EXE");
+        Check(File.ReadAllText(oldMain) == "old webview2 runtime", "failed candidate did not restore old runtime");
+        Check(File.Exists(oldUserDoc), "failed candidate rollback lost unlisted user note");
+
+        // Case 2: Candidate succeeds readiness -> commits new runtime and preserves unlisted file!
+        var handoffSuccess = new TestHandoff { CandidateReady = true };
+        UpdateInstallResult resultSuccess = await manager.InstallAsync(
+            new VerifiedUpdate(packageExe, "v1.26", Hash(pkgBytes), runtimeVersion: "155.0.4283.45", runtimeSha256: pkgManifestSha),
+            installExe,
+            handoffSuccess,
+            CancellationToken.None);
+
+        Check(resultSuccess.Status == UpdateInstallStatus.Installed, "ready candidate failed install");
+        Check(File.ReadAllBytes(installExe).AsSpan().SequenceEqual(pkgBytes), "ready candidate did not update EXE");
+        Check(File.ReadAllText(oldMain) == "new webview2 runtime", "ready candidate did not commit new runtime");
+        Check(File.Exists(oldUserDoc), "successful runtime commit lost unlisted user note");
+        Check(resultSuccess.Error != null && resultSuccess.Error.Contains("preserved in runtime backup"), "commit error did not report preserved unlisted note");
+
+        // Case 3: VerifiedUpdate with tampered runtime hash fails closed before candidate launch or suspension!
+        var handoffTampered = new TestHandoff { CandidateReady = true };
+        UpdateInstallResult resultTampered = await manager.InstallAsync(
+            new VerifiedUpdate(packageExe, "v1.26", Hash(pkgBytes), runtimeVersion: "155.0.4283.45", runtimeSha256: "0000000000000000000000000000000000000000000000000000000000000000"),
+            installExe,
+            handoffTampered,
+            CancellationToken.None);
+        Check(resultTampered.Status == UpdateInstallStatus.Failed && resultTampered.Error.Contains("runtime manifest hash does not match"), "tampered runtime hash binding did not fail closed");
+        Check(handoffTampered.Starts == 0 && handoffTampered.Completes == 0, "tampered runtime launched candidate");
+        Check(File.ReadAllBytes(installExe).AsSpan().SequenceEqual(pkgBytes), "tampered runtime update modified executable");
+
+        // Case 4: VerifiedUpdate with missing runtime directory when runtimeVersion is declared fails closed!
+        var handoffMissing = new TestHandoff { CandidateReady = true };
+        string missingPackageExe = Path.Combine(root, "missing-runtime-pkg", "RemsupDesktop.exe");
+        Directory.CreateDirectory(Path.GetDirectoryName(missingPackageExe));
+        File.WriteAllBytes(missingPackageExe, pkgBytes);
+        UpdateInstallResult resultMissing = await manager.InstallAsync(
+            new VerifiedUpdate(missingPackageExe, "v1.26", Hash(pkgBytes), runtimeVersion: "155.0.4283.45", runtimeSha256: "0000000000000000000000000000000000000000000000000000000000000000"),
+            installExe,
+            handoffMissing,
+            CancellationToken.None);
+        Check(resultMissing.Status == UpdateInstallStatus.Failed && resultMissing.Error.Contains("requires an app-local runtime package"), "missing runtime package did not fail closed");
+        Check(handoffMissing.Starts == 0 && handoffMissing.Completes == 0, "missing runtime package launched candidate");
+
+        // Case 5: VerifiedUpdate with valid paired runtime metadata succeeds!
+        var handoffPaired = new TestHandoff { CandidateReady = true };
+        UpdateInstallResult resultPaired = await manager.InstallAsync(
+            new VerifiedUpdate(packageExe, "v1.26", Hash(pkgBytes), runtimeVersion: "155.0.4283.45", runtimeSha256: pkgManifestSha),
+            installExe,
+            handoffPaired,
+            CancellationToken.None);
+        Check(resultPaired.Status == UpdateInstallStatus.Installed, "valid paired runtime update failed");
+        Check(handoffPaired.Starts == 1 && handoffPaired.Completes == 1, "valid paired runtime update did not complete handoff");
     }
 }

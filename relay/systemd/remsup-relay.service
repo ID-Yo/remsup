@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/remsup-relay 8443 127.0.0.1 8445
+ExecStart=/root/remsup-relay 8443 127.0.0.1 8445
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true

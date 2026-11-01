@@ -4,7 +4,7 @@ import re
 import sys
 
 PATTERNS = {
-    'known-device-or-user': re.compile(r'\b(?:private-device-name|private-user-name)\b', re.I),
+    'known-device-or-user': re.compile(r'\b(?:zzzz|wdragon|nuk|ivand|desktop-1bn2oq5)\b', re.I),
     'device-id': re.compile(r'(?<!\d)\d{9}(?!\d)'),
     'ip-address': re.compile(r'\b(?:\d{1,3}\.){3}\d{1,3}\b'),
     'absolute-personal-path': re.compile(r'\b[A-Za-z]:[\\/]'),

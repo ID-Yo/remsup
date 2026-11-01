@@ -22,6 +22,8 @@ internal static class ScreenCaptureTests
         public string Typed="",Key="";
         public void Keyboard(string text,string key,ScreenGeometry geometry,Action authorize){authorize();Typed+=text;Key=key;}
         public void Mouse(string action,ScreenPoint point,int steps,Action authorize){if(BeforeMouse!=null)BeforeMouse();authorize();Inputs++;Changed=true;}
+        public bool HasPendingRelease{get{return false;}}
+        public bool ReleaseHeldInputs(){return true;}
     }
     static void Check(bool value,string message){if(!value)throw new Exception(message);}
     static void Refused(Action operation){try{operation();throw new Exception("Expected rejection");}catch(InvalidOperationException){}}

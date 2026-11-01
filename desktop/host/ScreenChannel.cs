@@ -65,7 +65,8 @@ internal sealed class ScreenChannel
         {
             Fields(request,"version","request_id","operation");
             var monitors=new List<object>();foreach(var monitor in access.Monitors())monitors.Add(new{monitor_id=monitor.MonitorId,geometry_version=monitor.Version,x=monitor.X,y=monitor.Y,width=monitor.Width,height=monitor.Height});
-            Write(stream,new{version=1,request_id=requestId,monitors,keyboard_control=true,text_max_utf16=128,keys=ScreenKeyboard.Keys,auto_accept=access.AutoAcceptLocal,view_requires_local_consent=!access.AutoAcceptLocal,control_requires_separate_local_consent=!access.AutoAcceptLocal,control_allowed=access.ControlAllowed});return true;
+            string[] mouseActions=new[]{"click","double-click","right-click","scroll","move","down","up","left-down","left-up","right-down","right-up","middle-down","middle-up"};
+            Write(stream,new{version=1,request_id=requestId,monitors,keyboard_control=true,text_max_utf16=128,keys=ScreenKeyboard.Keys,mouse_actions=mouseActions,min_capture_interval_ms=50,auto_accept=access.AutoAcceptLocal,view_requires_local_consent=!access.AutoAcceptLocal,control_requires_separate_local_consent=!access.AutoAcceptLocal,control_allowed=access.ControlAllowed});return true;
         }
         Guid lease;
         if(operation=="request")
@@ -81,6 +82,19 @@ internal sealed class ScreenChannel
             lease=Id(request,"session_id");var state=access.Snapshot;
             if(state.SessionId!=lease||state.ConnectionId!=connection)throw new InvalidOperationException("session-mismatch");
             if(operation=="status"||operation=="close")Fields(request,"version","request_id","operation","session_id");
+            else if(operation=="cadence")
+            {
+                Fields(request,"version","request_id","operation","session_id","interval_ms");
+                if(state.SessionId!=lease||state.ConnectionId!=connection||!state.CanView)
+                    throw new InvalidOperationException("permission-required");
+                access.RefreshEnvironment();
+                int interval=request.GetProperty("interval_ms").GetInt32();
+                if(interval<50||interval>1000)throw new InvalidDataException("interval-out-of-range");
+                int effective=access.SetCaptureInterval(interval);
+                var snap=access.Snapshot;
+                Write(stream,new{version=1,request_id=requestId,session_id=lease.ToString("D"),state=snap.State.ToString(),can_view=snap.CanView,can_control=snap.CanControl,remaining_ms=snap.RemainingMs,interval_ms=effective,ok=true});
+                stream.Flush();return true;
+            }
             else if(operation=="settings.read"||operation=="settings.set")
             {
                 if(operation=="settings.read")Fields(request,"version","request_id","operation","session_id");else Fields(request,"version","request_id","operation","session_id","name","value");

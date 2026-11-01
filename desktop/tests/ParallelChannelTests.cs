@@ -68,17 +68,58 @@ internal static class ParallelChannelTests
     [STAThread] static int Main(string[] args)
     {
         System.Text.Encoding.RegisterProvider(System.Text.CodePagesEncodingProvider.Instance);
-        var app=new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};app.Startup+=async(_,__)=>
+            static void DeterministicSocketWatchdogInterleaving()
+    {
+        var pair=LoopbackPair();using(pair.Client)using(pair.Server)
+        {
+            var s=pair.Server.Client;
+            Check(!SupportHost.IsSocketClosed(s),"live idle socket with empty buffer is not closed");
+            pair.Client.GetStream().Write(new byte[]{1,2,3},0,3);
+            pair.Client.GetStream().Flush();
+            byte[] buf=new byte[3];
+            int read=pair.Server.GetStream().Read(buf,0,3);
+            Check(read==3&&s.Available==0,"concurrent read drained buffer to 0 bytes");
+            Check(!SupportHost.IsSocketClosed(s),"watchdog peek distinguishes drained stream buffer from FIN");
+            pair.Client.Client.Shutdown(SocketShutdown.Both);
+            pair.Client.Close();
+            s.Poll(10000,SelectMode.SelectRead);
+            Check(SupportHost.IsSocketClosed(s),"watchdog peek detects genuine peer socket disconnect");
+        }
+    }
+    var app=new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};app.Startup+=async(_,__)=>
         {
             using var relay=new SyntheticPairingRelay();using var support=new SupportHost();using var screen=new ScreenWorkspace(true);using var peer=new ScreenPeer();support.ScreenHandler=screen.Serve;
+            var fileTransferDone=new ManualResetEventSlim();
+            support.FileHandler=(stream,token)=>
+            {
+                RemsupProtocol.WriteLine(stream,"READY");
+                var one=new byte[1];
+                for(int i=0;i<400;i++)
+                {
+                    int count=stream.Read(one,0,1);
+                    if(count!=1)throw new IOException("file-transfer stream closed during active transfer");
+                    Thread.Sleep(5);
+                }
+                fileTransferDone.Set();
+            };
             int readinessNotifications=0;support.RelayRegistrationsReady+=()=>throw new InvalidOperationException("synthetic closed readiness observer");support.RelayRegistrationsReady+=()=>Interlocked.Increment(ref readinessNotifications);
             int port=relay.Port;
             if(args.Length==2&&args[0]=="--owned-relay-port")port=int.Parse(args[1]);
             try
             {
+                DeterministicSocketWatchdogInterleaving();
                 support.StartFixture("127.0.0.1:"+port,"111222333","synthetic-only");await Task.Delay(1300);
                 Check(support.RelayRegistrationReady&&Volatile.Read(ref readinessNotifications)>0,"throwing readiness observer preserves both registrations and later observers");
                 using(var wrong=await Task.Run(()=>Open(port,"wrong-synthetic",true)))Check(RemsupProtocol.ReadLine(wrong.GetStream(),512)=="ERR no-agent","wrong screen password cannot consume a channel");
+                using(var file=await Task.Run(()=>Open(port)))
+                {
+                    Check(RemsupProtocol.ReadLine(file.GetStream(),512)=="OK","file-transfer route paired");
+                    RemsupProtocol.WriteLine(file.GetStream(),"REMSUPFILE1");
+                    Check(RemsupProtocol.ReadLine(file.GetStream(),512)=="READY","active file-transfer route accepted");
+                    for(int i=0;i<400;i++)file.GetStream().WriteByte((byte)i); file.GetStream().Flush();
+                    Check(fileTransferDone.Wait(10000),"active file-transfer stream survives relay watchdog polling");
+                }
+                await Task.Delay(1300);
                 await Task.Run(()=>peer.ConnectFixture("127.0.0.1",port,"111222333","synthetic-only",CancellationToken.None));
                 await Task.Run(()=>peer.Call("request",new{monitor_id="synthetic",control=false,operator_label="parallel-owned-test"}));await Task.Delay(300);Guid lease=peer.Lease;await Status(peer,lease);
                 await Task.Run(()=>peer.Call("capture"));

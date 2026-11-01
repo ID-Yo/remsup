@@ -63,13 +63,14 @@ class CommandPolicyTests(unittest.TestCase):
         original = remsup_relay_client.open_operator_socket
         remsup_relay_client.open_operator_socket = lambda *args, **kwargs: fake
         try:
-            result = remsup_relay_client.exec_command_over_relay("relay", 8443, "345 345 345", "otp", "hostname", 30, 262144)
+            result = remsup_relay_client.exec_command_over_relay("relay", 8443, "841 602 999", "otp", "hostname", 30, 262144)
         finally:
             remsup_relay_client.open_operator_socket = original
 
         self.assertIn(b"REMSUP1 EXEC 30 262144 ", fake.sent)
-        self.assertEqual(fake.timeout, 40)
-        self.assertEqual(result["device_id"], "345345345")
+        self.assertGreater(fake.timeout, 59)
+        self.assertLessEqual(fake.timeout, 60)
+        self.assertEqual(result["device_id"], "841602999")
         self.assertEqual(result["exit_code"], 0)
         self.assertEqual(result["stdout"], "DESKTOP\r\n")
         self.assertEqual(result["stderr"], "")

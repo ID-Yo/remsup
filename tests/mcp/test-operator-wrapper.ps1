@@ -8,9 +8,9 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot 'operator_wrapper_probe.py') -De
 Add-Type -AssemblyName System.Security
 function Protect($text,$entropy){[Security.Cryptography.ProtectedData]::Protect([Text.Encoding]::UTF8.GetBytes($text),[Text.Encoding]::UTF8.GetBytes($entropy),[Security.Cryptography.DataProtectionScope]::CurrentUser)}
 $password='WRAPPER_PASSWORD_SENTINEL';$token='WRAPPER_TOKEN_SENTINEL';$credential=Join-Path $OutputRoot 'codex.dpapi';$store=Join-Path $OutputRoot 'devices-v2.json'
-$config=@{token=$token;local_port=18765;route=@{relay_host='127.0.0.1';relay_port=8443;profile_host='relay.example.invalid';profile_port=443}}
+$config=@{token=$token;local_port=18765;route=@{relay_host='127.0.0.1';relay_port=8443;profile_host='91.227.77.177';profile_port=443}}
 [IO.File]::WriteAllBytes($credential,(Protect ($config|ConvertTo-Json -Depth 5 -Compress) 'Remsup.Mcp.codex.v1'))
-@{version=2;records=@(@{displayName='fixture';deviceId='123456789';transport='Relay';relayMode='Custom';host='relay.example.invalid';port=443;protectedPassword=[Convert]::ToBase64String((Protect $password 'Remsup.Operator.DeviceStore.v1'))})}|ConvertTo-Json -Depth 5|Set-Content $store
+@{version=2;records=@(@{displayName='fixture';deviceId='123456789';transport='Relay';relayMode='Custom';host='91.227.77.177';port=443;protectedPassword=[Convert]::ToBase64String((Protect $password 'Remsup.Operator.DeviceStore.v1'))})}|ConvertTo-Json -Depth 5|Set-Content $store
 $fixtureWrapper=Join-Path $OutputRoot 'remsup-mcp.ps1'
 # First prove the synthetic vault is decryptable by this exact runner user.
 $decrypts=& (Join-Path $OutputRoot 'saved-profile.ps1') -Name fixture -DeviceId 123456789 -StorePath $store -UseCredential {param($metadata,$secret) $secret -ceq 'WRAPPER_PASSWORD_SENTINEL'}
@@ -27,6 +27,17 @@ $result=$text|ConvertFrom-Json
 if(-not ($result.argv_clean -and $result.env_clean -and $result.stdin_credentials -and $result.unicode_command)){throw 'Protected stdin consumer not proved'}
 if((Get-ChildItem $OutputRoot -File|Where-Object Extension -eq '.json'|ForEach-Object {Get-Content $_.FullName -Raw}) -match $password){throw 'Plaintext credential in output files'}
 'PASS DPAPI wrapper delivers credentials through stdin only; argv/env/output clean'
+if($null -ne $result.execution_timeout){throw 'Legacy invocation sent explicit execution timeout'}
+foreach($seconds in @(1,300,'1','300')){
+ $timed=& $fixtureWrapper -Python python -Operation exec -Name fixture -DeviceId 123456789 -Command 'echo explicit-port' -LocalPort 24680 -ExecutionTimeoutSeconds $seconds -TimeoutSeconds 1 -CredentialFile $credential -StorePath $store | ConvertFrom-Json
+ if($timed.execution_timeout -ne $seconds){throw 'Execution timeout lost before protected consumer'}
+}
+foreach($seconds in @(0,301)){
+ $refused=$false
+ try{& $fixtureWrapper -ExecutionTimeoutSeconds $seconds -Operation exec -Name fixture -ErrorAction Stop|Out-Null}catch{$refused=$true}
+ if(-not $refused){throw 'Out-of-range execution timeout accepted'}
+}
+'PASS explicit execution timeout 1/300 via protected stdin; omitted legacy and invalid bounds preserved'
 $diag=& $fixtureWrapper -Python python -Operation diagnostics -Name fixture -DeviceId 123456789 -CredentialFile $credential -StorePath $store|ConvertFrom-Json
 if($diag.operation -ne 'diagnostics' -or -not $diag.diagnostics_command_absent){throw 'Protected diagnostics operation included a shell command'}
 'PASS diagnostics wrapper operation passes no command text'
@@ -61,6 +72,8 @@ $ErrorActionPreference='Stop'
 try {& $Wrapper -Python python -Operation exec -Command "echo fixture" -Name fixture -DeviceId 123456789 -CredentialFile $Credential -StorePath $Store} catch {Write-Output ('FAILURE: '+$_.Exception.Message);exit 1}
 '@,[Text.UTF8Encoding]::new($false))
 foreach($shell in @('powershell.exe','pwsh.exe')){
+ & $shell -NoProfile -File (Join-Path $PSScriptRoot 'test-execution-timeout-binding.ps1')
+ if($LASTEXITCODE -ne 0){throw "Raw execution timeout binding failed under $shell"}
  $shellPath=(Get-Command $shell -ErrorAction Stop).Source
  $start=[Diagnostics.ProcessStartInfo]::new($shellPath);$start.UseShellExecute=$false;$start.CreateNoWindow=$true;$start.RedirectStandardOutput=$true;$start.RedirectStandardError=$true
  $start.Arguments='-NoProfile -File "'+$runner+'" "'+$fixtureWrapper+'" "'+$credential+'" "'+$store+'"'

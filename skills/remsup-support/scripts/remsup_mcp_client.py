@@ -19,6 +19,7 @@ class ClientError(Exception):
         super().__init__(message);self.details=details or {}
 
 SCREEN_REFUSAL_CODES=frozenset(('permission-required','mouse-disabled','typing-disabled','control-required','session-mismatch','stale-frame','geometry-changed','geometry-version-mismatch','coordinates-out-of-range','invalid-action','invalid-scroll','input-rate-limit','protected-window','desktop-unavailable','dpi-unavailable','monitor-unavailable','local-input-active','foreground-required','foreground-monitor-mismatch','modifiers-held','keyboard-context-changed','invalid-keyboard-operation','key-not-allowed','text-size-limit','invalid-text','lease-expired'))
+FILE_ERROR_CODES=frozenset(('permission-required','permission-revoked','access-denied','parent-missing','source-missing','invalid-path','reparse-path','path-unavailable','partial-create-failed','insufficient-space','invalid-metadata','invalid-offset','invalid-request','invalid-chunk','size-mismatch','integrity-failed','source-changed','destination-exists','destination-changed','interrupted','transfer-timeout','cancelled','busy','unsupported-transfer','invalid-response','outcome-unknown','device-unavailable','owner-mismatch','capacity-full','transfer-expired','invalid-local-path','local-handle-query-failed','local-reparse-path','local-path-unavailable','local-source-changed','file-too-large','incomplete-chunk','invalid-transfer-metadata','remote-chunk-failed'))
 DIAGNOSTIC_STATES=frozenset(('Stopped','Connecting','RelayWaiting','SessionActive','Reconnecting','Failed'))
 DIAGNOSTIC_CHECK_RESULTS=frozenset(('Current','Available','Error','Disabled'))
 DIAGNOSTIC_INSTALL_RESULTS=frozenset(('Installed','Deferred','RolledBack','RecoveryFailed','Failed'))
@@ -32,7 +33,7 @@ DIAGNOSTIC_FAILURES={
 DIAGNOSTIC_WARNINGS=frozenset((
     "LAN IP is inactive. Refresh addresses and choose this computer's active private IPv4.",
     "LAN port must be 1-65535.",
-    "The network is Public — change it to Private in Windows Settings before using LAN.",
+    "The network is Public вЂ” change it to Private in Windows Settings before using LAN.",
     "LAN requires a Windows Private network. Check the network profile in Windows Settings.",
     "The scoped LAN firewall rule is missing. Select Prepare LAN firewall for this address and app.",
     "LAN identity is unavailable. Restore this Windows user's protected identity; it was not regenerated.",
@@ -147,6 +148,7 @@ def route_check(request, health):
         raise ClientError('route-mismatch: saved profile differs from provisioned relay')
 
 async def execute(request, call, emit=None, next_action=None):
+    validate_execution_timeout(request)
     if request.get('operation')=='diagnostics':
         validate_diagnostics_credentials(request.get('profile',{}).get('DeviceId'),request.get('otp'))
     health=await call('remsup_health',{})
@@ -157,7 +159,12 @@ async def execute(request, call, emit=None, next_action=None):
     route_check(request,health)
     credential={'device_id':request['profile']['DeviceId'],'otp':request['otp']}
     if request['operation']=='exec':
-        return {'result':await call('remsup_exec_command',{**credential,'command':request['command']})}
+        seconds=request.get('execution_timeout_seconds',health.get('command_timeout_seconds',30))
+        if type(seconds) is not int or not 1<=seconds<=300:raise ClientError('invalid-server-execution-timeout')
+        request['_command_wait_seconds']=max(request['timeout'],seconds+45)
+        args={**credential,'command':request['command']}
+        if 'execution_timeout_seconds' in request:args['execution_timeout_seconds']=seconds
+        return {'result':await call('remsup_exec_command',args)}
     if request['operation']=='diagnostics':
         result=project_diagnostics(await call('remsup_diagnostics',credential))
         if result.get('status')!='ok':
@@ -285,13 +292,15 @@ async def sdk_run(request,endpoint):
     from mcp.client.streamable_http import streamable_http_client
     import httpx
     def emit(value):print(sanitize(value,request),flush=True)
-    async with httpx.AsyncClient(headers={'Authorization':'Bearer '+request['token']},timeout=httpx.Timeout(15,read=request['timeout']),follow_redirects=False) as http_client, streamable_http_client(endpoint,http_client=http_client,terminate_on_close=True) as (reader,writer,_):
+    read_timeout=345 if request['operation']=='exec' else request['timeout']
+    async with httpx.AsyncClient(headers={'Authorization':'Bearer '+request['token']},timeout=httpx.Timeout(15,read=read_timeout),follow_redirects=False) as http_client, streamable_http_client(endpoint,http_client=http_client,terminate_on_close=True) as (reader,writer,_):
         async with ClientSession(reader,writer) as session:
             await session.initialize()
             if request['operation']=='diagnostics':
                 await diagnostics_tool_preflight(session)
             async def call(name,args):
-                result=await asyncio.wait_for(session.call_tool(name,args),request['timeout'])
+                wait=request['_command_wait_seconds'] if name=='remsup_exec_command' else request['timeout']
+                result=await asyncio.wait_for(session.call_tool(name,args),wait)
                 texts=[item.text for item in result.content if item.type=='text']
                 if result.isError:
                     if name=='remsup_diagnostics':return {'status':'error','error_code':'diagnostics-unavailable'}
@@ -317,6 +326,17 @@ async def sdk_run(request,endpoint):
                 if not line:return {'action':'close'}
                 if len(line)>65536:raise ClientError('screen-action-too-large')
                 return json.loads(line)
+            if request['operation'] == 'cancel':
+                return await call('remsup_file_cancel', {'transfer_id': request['transfer_id']})
+            if request['operation'] == 'status':
+                return await call('remsup_file_status', {'transfer_id': request['transfer_id']})
+            if request['operation'] in ('upload','download'):
+                from file_local import transfer
+                health=await call('remsup_health',{})
+                route_check(request,health)
+                validate_diagnostics_credentials(request['profile']['DeviceId'],request.get('otp'))
+                request['device_id']=request['profile']['DeviceId']
+                return await transfer(request,call,http_client,endpoint,emit)
             return await execute(request,call,emit,next_action if request.get('interactive') else None)
 
 def remote_error_category(text):
@@ -325,6 +345,12 @@ def remote_error_category(text):
     for code in ('screen-session-unavailable','invalid-screen-state','invalid-screen-permission-deadline','screen-response-mismatch','screen-request-refused','desktop-unavailable','geometry-changed','screen-connection-closed','invalid-image-metadata','unsupported-png','capture-failed'):
         if code in text:return code
     return 'busy' if 'busy' in text else 'no-agent' if 'no-agent' in text else 'auth' if 'auth' in text else 'remote-tool-refused'
+
+def validate_execution_timeout(request):
+    if 'execution_timeout_seconds' in request:
+        value=request['execution_timeout_seconds']
+        if request.get('operation')!='exec' or type(value) is not int or not 1<=value<=300:
+            raise ClientError('invalid-execution-timeout: exec requires integer 1..300')
 
 def main():
     logging.disable(logging.CRITICAL)
@@ -336,14 +362,22 @@ def main():
         line=sys.stdin.readline(1024*1024+1)
         if len(line)>1024*1024:raise ClientError('request-too-large')
         request=json.loads(line)
-        if request.get('operation') not in ('health','exec','diagnostics','screen') or not 1<=request.get('timeout',0)<=90:raise ClientError('invalid-operation-or-timeout')
+        if request.get('operation') not in ('health','exec','diagnostics','screen','upload','download','cancel','status') or not 1<=request.get('timeout',0)<=90:raise ClientError('invalid-operation-or-timeout')
+        validate_execution_timeout(request)
         with tunnel(request['config']) as endpoint:
-            result=asyncio.run(asyncio.wait_for(sdk_run(request,endpoint),630 if request.get('interactive') else min(300,request['timeout']*5)))
+            budget=1830 if request['operation'] in ('upload','download') else request['timeout']*2+360 if request['operation']=='exec' else 630 if request.get('interactive') else min(300,request['timeout']*5)
+            result=asyncio.run(asyncio.wait_for(sdk_run(request,endpoint),budget))
         print(sanitize({'ok':True,**result},request),flush=True)
         return 0
     except BaseException as failure:
+        local_file_error=()
+        if request.get('operation') in ('upload','download'):
+            local_file_error=getattr(sys.modules.get('file_local'),'LocalFileError',())
         def known(e):
             if isinstance(e,ClientError):return e
+            if isinstance(e,local_file_error):
+                code=str(e)
+                return ClientError(code if code in FILE_ERROR_CODES else 'transfer-failed')
             for child in getattr(e,'exceptions',[]):
                 message=known(child)
                 if message:return message

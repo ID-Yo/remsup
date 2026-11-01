@@ -10,7 +10,7 @@ internal static class LanSettingsUiTests {
   ModernWindow window=null;
   try{
    var diagnostics=new RuntimeDiagnostics(Path.Combine(args[0],"logs"));diagnostics.UpdateCheck("Available","v1.49","","");diagnostics.Install("RolledBack","readiness-failed");
-   using var relay=new SyntheticPairingRelay("fixture-password");File.WriteAllText(Path.Combine(args[0],"settings.txt"),"LanEnabled=True\nLanAddress=192.0.2.254\nLanPort=8444\n");
+   using var relay=new SyntheticPairingRelay("fixture-password");File.WriteAllText(Path.Combine(args[0],"settings.txt"),"LanEnabled=True\nLanAddress=172.16.250.254\nLanPort=8444\n");
    window=new ModernWindow(new HostOptions(new[]{"--fixture-root",args[0],"--fixture-relay","127.0.0.1:"+relay.Port}));app.MainWindow=window;window.Show();var view=(WebView2)typeof(ModernWindow).GetField("view",BindingFlags.Instance|BindingFlags.NonPublic).GetValue(window);
    var until=DateTime.UtcNow.AddSeconds(30);while(DateTime.UtcNow<until){if(view.CoreWebView2!=null&&await view.CoreWebView2.ExecuteScriptAsync("document.body.innerText.includes('LAN IP is inactive')")=="true")break;await Task.Delay(100);}
    File.WriteAllText(Path.Combine(args[0],"initial-ui.json"),await view.CoreWebView2.ExecuteScriptAsync("document.body.innerText"));

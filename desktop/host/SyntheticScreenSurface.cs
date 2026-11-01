@@ -28,5 +28,6 @@ internal sealed class SyntheticScreenSurface:IScreenSurface,IDisposable
     public void Mouse(string action,ScreenPoint point,int scrollSteps,Action authorize){Guid lease=CurrentLease?.Invoke()??Guid.Empty;int version=GeometryVersion;canvas.Dispatcher.BeginInvoke(new Action(()=>{if(Locked||GeometryVersion!=version||CurrentLease?.Invoke()!=lease||CanInput?.Invoke()!=true)return;try{authorize();}catch(InvalidOperationException){return;}button.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));Render();}));}
     internal string Typed="",LastKey="";
     public void Keyboard(string text,string key,ScreenGeometry geometry,Action authorize){canvas.Dispatcher.BeginInvoke(new Action(()=>{if(Locked||!geometry.Matches(Geometry("synthetic")))return;try{authorize();}catch(InvalidOperationException){return;}Typed+=text;LastKey=key;}));}
+    public bool PendingRelease; public bool HasPendingRelease=>PendingRelease; public bool ReleaseHeldInputs(){PendingRelease=false;return true;}
     public void Dispose(){window.Close();}
 }

@@ -3,12 +3,14 @@ using System;
 internal interface IScreenSurface
 {
     bool IsInteractive { get; }
+    bool HasPendingRelease { get; }
     ScreenGeometry[] Monitors();
     ScreenGeometry Geometry(string monitorId);
     ScreenImage Capture(ScreenGeometry geometry);
     bool IsProtectedPoint(ScreenPoint point);
     void Mouse(string action,ScreenPoint point,int scrollSteps,Action authorize);
     void Keyboard(string text,string key,ScreenGeometry geometry,Action authorize);
+    bool ReleaseHeldInputs();
 }
 internal sealed class ScreenImage
 {
@@ -37,31 +39,79 @@ internal sealed class ScreenAccess
     public bool AutoAcceptLocal{get{lock(gate)return autoAcceptLocal;}set{lock(gate)autoAcceptLocal=value;}}
     public bool CanMouse{get{lock(gate)return session.Snapshot.CanControl&&mouseAllowed;}}
     public bool CanType{get{lock(gate)return session.Snapshot.CanControl&&typingAllowed;}}
-    public void SetPolicy(bool view,bool control){lock(gate){viewAllowed=view;controlAllowed=control;if(!view)session.Revoke();if(!control)session.DisableControl();}}
-    public void SetLocalInput(bool mouse,bool typing){lock(gate){mouseAllowed=mouse;typingAllowed=typing;}}
+    public void SetPolicy(bool view,bool control){lock(gate){viewAllowed=view;controlAllowed=control;if(!view){session.Revoke();surface.ReleaseHeldInputs();}if(!control){session.DisableControl();surface.ReleaseHeldInputs();}}}
+    public int SetCaptureInterval(int intervalMs){
+        lock(gate){
+            var snapshot=session.Snapshot;
+            if(!snapshot.CanView)throw new InvalidOperationException("permission-required");
+            Interactive();
+            if(intervalMs<50||intervalMs>1000)throw new InvalidOperationException("interval-out-of-range");
+            frames.CaptureIntervalMs=intervalMs;
+            return frames.CaptureIntervalMs;
+        }
+    }
+    public void SetLocalInput(bool mouse,bool typing){
+        lock(gate){
+            bool mouseRevoked = mouseAllowed && !mouse;
+            mouseAllowed=mouse;typingAllowed=typing;
+            if(mouseRevoked){try{surface.ReleaseHeldInputs();}catch{}}
+        }
+    }
+    public bool HasPendingRelease{get{lock(gate)return surface.HasPendingRelease;}}
+    void EnsureCleanRelease(){if(surface.HasPendingRelease){try{surface.ReleaseHeldInputs();}catch{}if(surface.HasPendingRelease)throw new InvalidOperationException("pending-input-release");}}
     internal ScreenAccess(IScreenSurface provider,Func<long> clock)
     {
-        if(provider==null)throw new ArgumentNullException("provider");surface=provider;session=new ScreenSession(clock);frames=new ScreenFrames(session,clock);
+        if(provider==null)throw new ArgumentNullException("provider");surface=provider;session=new ScreenSession(clock);frames=new ScreenFrames(session,clock);session.Invalidated+=()=>{try{surface.ReleaseHeldInputs();}catch{}};session.Invalidated+=()=>{frames.CaptureIntervalMs=1000;};
     }
     public ScreenSessionSnapshot Snapshot{get{lock(gate)return session.Snapshot;}}
-    public Guid Request(string connection,string monitor,bool control){lock(gate){if(!viewAllowed)throw new InvalidOperationException("screen-disabled");Interactive();var geometry=surface.Geometry(monitor);Guid id=session.Request(connection,monitor,control&&controlAllowed);requestedGeometry=geometry;mouseAllowed=typingAllowed=true;return id;}}
-    public void GrantLocal(Guid id,bool control,bool automatically=false){lock(gate){if(!viewAllowed)throw new InvalidOperationException("screen-disabled");if(control&&!controlAllowed)throw new InvalidOperationException("control-disabled");Interactive();session.GrantLocal(id,control,automatically);}}
-    public void GrantConfigured(Guid id,string connection){lock(gate){var current=session.Snapshot;if(!autoAcceptLocal||!viewAllowed||current.State!=ScreenSessionState.Pending||current.SessionId!=id||current.ConnectionId!=connection)return;Interactive();session.GrantLocal(id,current.RequestedControl&&controlAllowed,true);}}
+    public Guid Request(string connection,string monitor,bool control){
+    lock(gate){
+        if(!viewAllowed)throw new InvalidOperationException("screen-disabled");
+        Interactive();
+        var snapshot=session.Snapshot;
+        if(snapshot.State==ScreenSessionState.Pending||snapshot.State==ScreenSessionState.Granted)throw new InvalidOperationException("busy");
+        EnsureCleanRelease();
+        var geometry=surface.Geometry(monitor);
+        Guid id=session.Request(connection,monitor,control&&controlAllowed);
+        requestedGeometry=geometry;
+        mouseAllowed=typingAllowed=true;
+        frames.CaptureIntervalMs=1000;
+        return id;
+    }
+}
+    public void GrantLocal(Guid id,bool control,bool automatically=false){lock(gate){EnsureCleanRelease();if(!viewAllowed)throw new InvalidOperationException("screen-disabled");if(control&&!controlAllowed)throw new InvalidOperationException("control-disabled");Interactive();session.GrantLocal(id,control,automatically);}}
+    public void GrantConfigured(Guid id,string connection){
+    lock(gate){
+        var current=session.Snapshot;
+        if(!autoAcceptLocal||!viewAllowed||current.State!=ScreenSessionState.Pending||current.SessionId!=id||current.ConnectionId!=connection)return;
+        Interactive();
+        EnsureCleanRelease();
+        session.GrantLocal(id,current.RequestedControl&&controlAllowed,true);
+    }
+}
     public void DenyLocal(Guid id){lock(gate)session.DenyLocal(id);}
-    public void Stop(){lock(gate)session.Revoke();}
+    public void Stop(){lock(gate){session.Revoke();surface.ReleaseHeldInputs();}}
     public void RequireControl(string connection,Guid lease){lock(gate){session.Require(connection,lease,true);Interactive();}}
-    public void DisableControl(){lock(gate)session.DisableControl();}
-    public void Disconnect(string connection){lock(gate)session.Disconnect(connection);}
+    public void DisableControl(){lock(gate){session.DisableControl();surface.ReleaseHeldInputs();}}
+    public void Disconnect(string connection){lock(gate){session.Disconnect(connection);surface.ReleaseHeldInputs();}}
     public ScreenGeometry[] Monitors(){lock(gate){Interactive();return surface.Monitors();}}
-    public void RefreshEnvironment(){lock(gate){var state=session.Snapshot.State;if(state==ScreenSessionState.Pending||state==ScreenSessionState.Granted)Interactive();}}
+    public void RefreshEnvironment(){
+        lock(gate){
+            var state=session.Snapshot.State;
+            if(state==ScreenSessionState.Pending||state==ScreenSessionState.Granted)Interactive();
+            if(!session.Snapshot.CanControl||!mouseAllowed||state==ScreenSessionState.Off||state==ScreenSessionState.Revoked){
+                if(surface.HasPendingRelease){try{surface.ReleaseHeldInputs();}catch{}}
+            }
+        }
+    }
     void Interactive()
     {
-        if(!surface.IsInteractive){session.Revoke();throw new InvalidOperationException("desktop-unavailable");}
+        if(!surface.IsInteractive){session.Revoke();try{surface.ReleaseHeldInputs();}catch{}throw new InvalidOperationException("desktop-unavailable");}
         var snapshot=session.Snapshot;
         if(snapshot.State==ScreenSessionState.Pending||snapshot.State==ScreenSessionState.Granted)
         {
             try{if(requestedGeometry==null||!requestedGeometry.Matches(surface.Geometry(snapshot.MonitorId)))throw new InvalidOperationException("geometry-changed");}
-            catch{session.Revoke();throw;}
+            catch{session.Revoke();try{surface.ReleaseHeldInputs();}catch{}throw;}
         }
     }
     public ScreenCaptureResult Capture(string connection,Guid lease)
@@ -97,10 +147,11 @@ internal sealed class ScreenAccess
     {
         lock(gate)
         {
-            if(!mouseAllowed)throw new InvalidOperationException("mouse-disabled");
+            bool isButtonUp=action=="up"||action=="left-up"||action=="right-up"||action=="middle-up";
+            if(!mouseAllowed&&!isButtonUp)throw new InvalidOperationException("mouse-disabled");
             session.Require(connection,lease,true);Interactive();var geometry=surface.Geometry(session.Snapshot.MonitorId);
             var point=frames.ValidateMouse(connection,lease,frame,geometry,action,x,y,scrollSteps,geometryVersion);
-            if(surface.IsProtectedPoint(point))throw new InvalidOperationException("protected-window");
+            if(surface.IsProtectedPoint(point)&&!isButtonUp)throw new InvalidOperationException("protected-window");
             Interactive();session.Require(connection,lease,true);surface.Mouse(action,point,scrollSteps,()=>session.Require(connection,lease,true));
         }
     }

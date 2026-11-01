@@ -24,6 +24,25 @@ internal static class ScreenInputTests
         Refused(()=>frames.ValidateMouse("test",id,first.FrameId,geometry,"click",1,1,0));
         now=9000;frames.ValidateMouse("test",id,second.FrameId,geometry,"click",1,1,0);
         now=31001;Refused(()=>frames.ValidateMouse("test",id,second.FrameId,geometry,"click",1,1,0));
+        var continuousFrame=frames.Record("test",id,geometry,960,540);
+        // Continuous move testing: 15ms interval allowed, <15ms rejected
+        now+=1000;
+        var movePoint=frames.ValidateMouse("test",id,continuousFrame.FrameId,geometry,"move",100,100,0);
+        Check(movePoint!=null,"move validation failed");
+        now+=10;
+        Refused(()=>frames.ValidateMouse("test",id,continuousFrame.FrameId,geometry,"move",105,105,0)); // 10ms < 15ms
+        now+=15;
+        movePoint=frames.ValidateMouse("test",id,continuousFrame.FrameId,geometry,"move",110,110,0);
+        Check(movePoint!=null,"subsequent move validation failed");
+        // Button down / up testing: 50ms interval required for down, up is never rate-blocked
+        now+=50;
+        var downPoint=frames.ValidateMouse("test",id,continuousFrame.FrameId,geometry,"down",110,110,0);
+        Check(downPoint!=null,"down validation failed");
+        now+=20;
+        Refused(()=>frames.ValidateMouse("test",id,continuousFrame.FrameId,geometry,"down",110,110,0)); // 20ms < 50ms for down
+        now+=10;
+        var upPoint=frames.ValidateMouse("test",id,continuousFrame.FrameId,geometry,"up",110,110,0); // up release is never rate-blocked
+        Check(upPoint!=null,"up validation failed");
         var third=frames.Record("test",id,geometry,960,540);
         var changed=new ScreenGeometry("left",2,-1920,-200,1920,1080);
         Refused(()=>frames.ValidateMouse("test",id,third.FrameId,changed,"click",1,1,0));

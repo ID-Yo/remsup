@@ -51,12 +51,16 @@ internal sealed class VerifiedUpdate
     internal string Path { get; }
     internal string Version { get; }
     internal string Sha256 { get; }
+    internal string RuntimeVersion { get; }
+    internal string RuntimeSha256 { get; }
 
-    internal VerifiedUpdate(string path, string version, string sha256)
+    internal VerifiedUpdate(string path, string version, string sha256, string runtimeVersion = null, string runtimeSha256 = null)
     {
         Path = path;
         Version = version;
         Sha256 = sha256;
+        RuntimeVersion = runtimeVersion;
+        RuntimeSha256 = runtimeSha256;
     }
 }
 
@@ -102,18 +106,15 @@ internal interface IUpdateHandoff
 }
 
 /// <summary>
-/// Downloads only the configured Remsup release resources over the caller-supplied pinned TLS client,
+/// Downloads only the fixed private Remsup release resources over the caller-supplied pinned TLS client,
 /// verifies the published SHA256SUMS entry and manifest hash, then performs a rollback-capable EXE handoff.
 /// </summary>
 internal sealed class UpdateManager : IDisposable
 {
-    internal static readonly string UpdateHost = Environment.GetEnvironmentVariable("REMSUP_UPDATE_HOST") ?? "updates.example.invalid";
-    internal static readonly int UpdatePort = int.Parse(Environment.GetEnvironmentVariable("REMSUP_UPDATE_PORT") ?? "8444");
-    internal static readonly string UpdatePin = Environment.GetEnvironmentVariable("REMSUP_UPDATE_PIN") ?? "0000000000000000000000000000000000000000000000000000000000000000";
-    internal static bool IsConfigured => !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("REMSUP_UPDATE_HOST")) && !string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("REMSUP_UPDATE_PIN"));
-    internal static string BaseUrl => new UriBuilder("https", UpdateHost, UpdatePort).Uri.AbsoluteUri;
-    internal static string ManifestUrl => BaseUrl + "latest.json";
-    internal static string ChecksumsUrl => BaseUrl + "SHA256SUMS.txt";
+    internal const string ManifestUrl = "https://91.227.77.177:8444/latest.json";
+    internal const string ChecksumsUrl = "https://91.227.77.177:8444/SHA256SUMS.txt";
+    const string UpdateHost = "91.227.77.177";
+    const int UpdatePort = 8444;
     static readonly TimeSpan MetadataTimeout = TimeSpan.FromSeconds(15);
     static readonly TimeSpan DownloadTimeout = TimeSpan.FromSeconds(180);
     internal static readonly TimeSpan CandidateReadyTimeout = TimeSpan.FromSeconds(60);
@@ -177,7 +178,7 @@ internal sealed class UpdateManager : IDisposable
         string partial = path + ".part";
         try
         {
-            await DownloadFileAsync(new Uri(BaseUrl + Uri.EscapeDataString(release.Filename)), partial, cancellationToken).ConfigureAwait(false);
+            await DownloadFileAsync(new Uri("https://91.227.77.177:8444/" + Uri.EscapeDataString(release.Filename)), partial, cancellationToken).ConfigureAwait(false);
             string actualHash = await HashFileAsync(partial, cancellationToken).ConfigureAwait(false);
             if (!HashEquals(actualHash, release.Sha256)) throw new InvalidDataException("The downloaded executable does not match its published SHA256.");
             File.Move(partial, path, true);
@@ -208,6 +209,9 @@ internal sealed class UpdateManager : IDisposable
         bool suspended = false;
         bool candidateMoved = false;
         bool ready = false;
+        RuntimeTransactionState runtimeState = RuntimeTransactionState.None;
+        string runtimeBackup = null;
+        string targetRuntimeDir = Path.Combine(directory, "runtimes", "webview2");
         string phase = "prepare and suspend update";
 
         try
@@ -225,6 +229,39 @@ internal sealed class UpdateManager : IDisposable
             await CopyFileAsync(fullPackage, adjacent, cancellationToken).ConfigureAwait(false);
             if (!HashEquals(await HashFileAsync(adjacent, cancellationToken).ConfigureAwait(false), update.Sha256))
                 throw new InvalidDataException("The adjacent update copy failed SHA256 verification.");
+
+            string sourceRuntimeDir = Path.Combine(Path.GetDirectoryName(fullPackage), "runtimes", "webview2");
+            if (!Directory.Exists(sourceRuntimeDir) && installCopy) {
+                string altSource = Path.Combine(Path.GetDirectoryName(fullExe), "runtimes", "webview2");
+                if (Directory.Exists(altSource)) sourceRuntimeDir = altSource;
+            }
+            bool hasRuntimeDir = Directory.Exists(sourceRuntimeDir) && File.Exists(Path.Combine(sourceRuntimeDir, UserInstallation.RuntimeManifestName));
+            bool isBoundRuntime = update.RuntimeVersion != null || update.RuntimeSha256 != null;
+
+            if (isBoundRuntime && (update.RuntimeVersion == null || update.RuntimeSha256 == null)) {
+                TryDelete(adjacent);
+                return new UpdateInstallResult(UpdateInstallStatus.Failed, error: "The verified update runtime metadata must include both version and manifest hash.");
+            }
+
+            if (isBoundRuntime) {
+                if (!hasRuntimeDir) {
+                    TryDelete(adjacent);
+                    return new UpdateInstallResult(UpdateInstallStatus.Failed, error: "The verified update requires an app-local runtime package, but none was found.");
+                }
+                string markerPath = Path.Combine(sourceRuntimeDir, UserInstallation.RuntimeManifestName);
+                string markerSha = (await HashFileAsync(markerPath, cancellationToken).ConfigureAwait(false)).ToLowerInvariant();
+                if (!HashEquals(markerSha, update.RuntimeSha256)) {
+                    TryDelete(adjacent);
+                    return new UpdateInstallResult(UpdateInstallStatus.Failed, error: "The runtime manifest hash does not match the verified package signature.");
+                }
+                if (!UserInstallation.VerifyRuntimeDirectory(sourceRuntimeDir, out var srcMan) || !string.Equals(srcMan.version, update.RuntimeVersion, StringComparison.OrdinalIgnoreCase)) {
+                    TryDelete(adjacent);
+                    return new UpdateInstallResult(UpdateInstallStatus.Failed, error: "The runtime manifest version does not match the verified package signature.");
+                }
+            } else if (!installCopy && hasRuntimeDir) {
+                // An unbound network update does not stage arbitrary adjacent files.
+                hasRuntimeDir = false;
+            }
 
             if (!await handoff.TrySuspendIfIdleAsync(cancellationToken).ConfigureAwait(false))
             {
@@ -245,12 +282,24 @@ internal sealed class UpdateManager : IDisposable
             File.Move(adjacent, candidate);
             candidateMoved = true;
 
+            if (hasRuntimeDir) {
+                phase = "stage app-local runtime";
+                if (!UserInstallation.StageRuntimePackage(sourceRuntimeDir, targetRuntimeDir, out runtimeBackup, out runtimeState, update.RuntimeVersion, update.RuntimeSha256)) {
+                    bool runtimeRecovered = (runtimeState == RuntimeTransactionState.None || runtimeState == RuntimeTransactionState.NoOp) || UserInstallation.RollbackStagedRuntime(targetRuntimeDir, runtimeBackup, runtimeState);
+                    bool fileRestored = RestorePredecessor(candidate, backup, candidateMoved, predecessorMoved, rotatedBackup) && runtimeRecovered;
+                    bool registrationsRestored = !suspended || await TryResumeAsync(handoff, CancellationToken.None).ConfigureAwait(false);
+                    bool restored = fileRestored && registrationsRestored;
+                    return new UpdateInstallResult(restored ? UpdateInstallStatus.Failed : UpdateInstallStatus.RecoveryFailed, registrationsRestored, "The app-local runtime package failed verification or staging.");
+                }
+            }
+
             string eventName = "Local\\Remsup.Update.Ready." + Guid.NewGuid().ToString("N");
             phase = "launch candidate";
             ready = await handoff.StartCandidateAndWaitForReadyAsync(candidate, eventName, CandidateReadyTimeout, cancellationToken).ConfigureAwait(false);
             if (!ready)
             {
-                bool fileRestored = RestorePredecessor(candidate, backup, candidateMoved, predecessorMoved, rotatedBackup);
+                bool runtimeRestored = UserInstallation.RollbackStagedRuntime(targetRuntimeDir, runtimeBackup, runtimeState);
+                bool fileRestored = RestorePredecessor(candidate, backup, candidateMoved, predecessorMoved, rotatedBackup) && runtimeRestored;
                 bool registrationsRestored = await TryResumeAsync(handoff, CancellationToken.None).ConfigureAwait(false);
                 bool restored = fileRestored && registrationsRestored;
                 return new UpdateInstallResult(restored ? UpdateInstallStatus.RolledBack : UpdateInstallStatus.RecoveryFailed, registrationsRestored,
@@ -260,6 +309,10 @@ internal sealed class UpdateManager : IDisposable
 
             string commitError = "";
             try {
+                if (!UserInstallation.CommitStagedRuntime(runtimeBackup, out int preservedRemaining)) {
+                    if (preservedRemaining > 0) commitError += " Some unlisted files were preserved in runtime backup: " + runtimeBackup;
+                    else commitError += " Runtime backup cleanup incomplete.";
+                }
                 // The portable source of an installation is intentionally retained.
                 string cleanup = inPlace ? (installed ? rotatedBackup : backup) : null;
                 if (cleanup != null) File.WriteAllText(candidate + ".cleanup.json", JsonSerializer.Serialize(new[] { cleanup }));
@@ -275,7 +328,8 @@ internal sealed class UpdateManager : IDisposable
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            bool fileRestored = RestorePredecessor(candidate, backup, candidateMoved, predecessorMoved, rotatedBackup);
+            bool runtimeRestored = UserInstallation.RollbackStagedRuntime(targetRuntimeDir, runtimeBackup, runtimeState);
+            bool fileRestored = RestorePredecessor(candidate, backup, candidateMoved, predecessorMoved, rotatedBackup) && runtimeRestored;
             bool registrationsRestored = !suspended || await TryResumeAsync(handoff, CancellationToken.None).ConfigureAwait(false);
             bool restored = fileRestored && registrationsRestored;
             return new UpdateInstallResult(restored ? (suspended ? UpdateInstallStatus.RolledBack : UpdateInstallStatus.Failed) : UpdateInstallStatus.RecoveryFailed,
@@ -283,7 +337,8 @@ internal sealed class UpdateManager : IDisposable
         }
         catch (Exception failure)
         {
-            bool fileRestored = RestorePredecessor(candidate, backup, candidateMoved, predecessorMoved, rotatedBackup);
+            bool runtimeRestored = UserInstallation.RollbackStagedRuntime(targetRuntimeDir, runtimeBackup, runtimeState);
+            bool fileRestored = RestorePredecessor(candidate, backup, candidateMoved, predecessorMoved, rotatedBackup) && runtimeRestored;
             bool registrationsRestored = !suspended || await TryResumeAsync(handoff, CancellationToken.None).ConfigureAwait(false);
             bool restored = fileRestored && registrationsRestored;
             return new UpdateInstallResult(!restored ? UpdateInstallStatus.RecoveryFailed : suspended ? UpdateInstallStatus.RolledBack : UpdateInstallStatus.Failed,

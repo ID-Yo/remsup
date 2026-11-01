@@ -31,6 +31,8 @@ internal sealed class ScreenFrames
 {
     readonly object gate=new object();readonly ScreenSession session;readonly Func<long> milliseconds;
     ScreenFrameReference latest;long lastCapture=-1000,lastInput=-200;
+    int captureIntervalMs = 1000;
+    public int CaptureIntervalMs { get { return captureIntervalMs; } set { captureIntervalMs = value; } }
     public ScreenFrames(ScreenSession owner):this(owner,Clock()){}
     internal ScreenFrames(ScreenSession owner,Func<long> clock){if(owner==null||clock==null)throw new ArgumentNullException();session=owner;milliseconds=clock;}
     static Func<long> Clock(){var clock=Stopwatch.StartNew();return ()=>clock.ElapsedMilliseconds;}
@@ -40,7 +42,7 @@ internal sealed class ScreenFrames
         {
             session.Require(connection,lease,false);
             if(geometry==null||geometry.MonitorId!=session.Snapshot.MonitorId)throw new InvalidOperationException("monitor-mismatch");
-            if(milliseconds()-lastCapture<1000)throw new InvalidOperationException("capture-rate-limit");
+            if(milliseconds()-lastCapture<CaptureIntervalMs)throw new InvalidOperationException("capture-rate-limit");
             if(latest!=null&&latest.SessionId==lease&&!latest.Geometry.Matches(geometry)){session.Revoke();throw new InvalidOperationException("geometry-changed");}
         }
     }
@@ -51,7 +53,7 @@ internal sealed class ScreenFrames
             session.Require(connection,lease,false);
             if(geometry==null||geometry.MonitorId!=session.Snapshot.MonitorId)throw new InvalidOperationException("monitor-mismatch");
             if(width<2||height<2||width>1920||height>1920||width>geometry.Width||height>geometry.Height||Math.Abs((long)width*geometry.Height-(long)height*geometry.Width)>Math.Max(geometry.Width,geometry.Height))throw new InvalidOperationException("invalid-frame-size");
-            long now=milliseconds();if(now-lastCapture<1000)throw new InvalidOperationException("capture-rate-limit");
+            long now=milliseconds();if(now-lastCapture<CaptureIntervalMs)throw new InvalidOperationException("capture-rate-limit");
             if(latest!=null&&latest.SessionId==lease&&!latest.Geometry.Matches(geometry)){session.Revoke();throw new InvalidOperationException("geometry-changed");}
             latest=new ScreenFrameReference(lease,geometry,width,height,now);lastCapture=now;return latest;
         }
@@ -70,12 +72,31 @@ internal sealed class ScreenFrames
     {
         lock(gate)
         {
-            ValidateContext(connection,lease,frame,current,geometryVersion);
-            long now=milliseconds();
-            if(x<0||y<0||x>=latest.Width||y>=latest.Height)throw new InvalidOperationException("coordinates-out-of-range");
-            if(action!="click"&&action!="double-click"&&action!="right-click"&&action!="scroll")throw new InvalidOperationException("invalid-action");
+            bool isContinuousMove=action=="move";
+            bool isButtonDown=action=="down"||action=="left-down"||action=="right-down"||action=="middle-down";
+            bool isButtonUp=action=="up"||action=="left-up"||action=="right-up"||action=="middle-up";
+            bool isButtonAction=isButtonDown||isButtonUp;
+            if(action!="click"&&action!="double-click"&&action!="right-click"&&action!="scroll"&&!isContinuousMove&&!isButtonAction)throw new InvalidOperationException("invalid-action");
             if(action=="scroll"?(steps==0||steps<-10||steps>10):steps!=0)throw new InvalidOperationException("invalid-scroll");
-            if(now-lastInput<200)throw new InvalidOperationException("input-rate-limit");
+
+            long now=milliseconds();
+
+            // For button UP: least-authority release: never rate-blocked, never stale-frame rejected while lease is active
+            if(isButtonUp)
+            {
+                session.Require(connection,lease,true);
+                lastInput=now;
+                int clampW=latest!=null?latest.Width:current.Width;
+                int clampH=latest!=null?latest.Height:current.Height;
+                int cx=Math.Max(0,Math.Min(clampW-1,x));
+                int cy=Math.Max(0,Math.Min(clampH-1,y));
+                return new ScreenPoint(current.X+(int)Math.Round((double)cx*(current.Width-1)/(clampW-1),MidpointRounding.AwayFromZero),current.Y+(int)Math.Round((double)cy*(current.Height-1)/(clampH-1),MidpointRounding.AwayFromZero));
+            }
+
+            ValidateContext(connection,lease,frame,current,geometryVersion);
+            if(x<0||y<0||x>=latest.Width||y>=latest.Height)throw new InvalidOperationException("coordinates-out-of-range");
+            long minInterval=isContinuousMove?15:isButtonDown?50:200;
+            if(minInterval>0&&now-lastInput<minInterval)throw new InvalidOperationException("input-rate-limit");
             lastInput=now;
             return new ScreenPoint(current.X+(int)Math.Round((double)x*(current.Width-1)/(latest.Width-1),MidpointRounding.AwayFromZero),current.Y+(int)Math.Round((double)y*(current.Height-1)/(latest.Height-1),MidpointRounding.AwayFromZero));
         }

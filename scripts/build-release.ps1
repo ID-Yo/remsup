@@ -2,7 +2,6 @@ param([Parameter(Mandatory = $true)][string] $Version,[string]$Output)
 $ErrorActionPreference = 'Stop'
 if ($Version -notmatch '^v1\.\d+$') { throw 'Version must use v1.N' }
 $root = Split-Path -Parent $PSScriptRoot
-& powershell.exe -NoProfile -File (Join-Path $root 'scripts/build-icon.ps1');if($LASTEXITCODE){throw 'Icon generation failed'}
 $release = Join-Path $root 'releases'
 if($Output){
  if($Output -notmatch '^(?:[A-Za-z]:[\\/]|\\\\[^\\]+\\[^\\]+\\)' -or (Test-Path -LiteralPath $Output)){throw 'Output requires a new absolute release directory'}

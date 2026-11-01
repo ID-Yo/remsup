@@ -118,7 +118,7 @@ class RelayLifecycleTests(unittest.TestCase):
         peer = socket.create_connection(("127.0.0.1", self.proxy_port), timeout=3)
         self.peers.append(peer)
         if header is None:
-            header = f"PROXY TCP4 {source} 192.0.2.1 50000 443\r\n"
+            header = f"PROXY TCP4 {source} 91.227.77.177 50000 443\r\n"
         peer.sendall(header.encode("ascii"))
         return peer
 
@@ -144,7 +144,7 @@ class RelayLifecycleTests(unittest.TestCase):
         self.assertEqual(read_line(mcp), b"ERR no-agent\n")
 
     def test_proxy_requires_valid_trusted_header(self):
-        for header in (f"AGENT 111222333 synthetic-only {KEY}\n", "PROXY UNKNOWN\n", "PROXY TCP4 wrong 192.0.2.1 3 443\n", "PROXY TCP4 198.51.100.1 192.0.2.1 3 443 EXTRA\n"):
+        for header in (f"AGENT 111222333 synthetic-only {KEY}\n", "PROXY UNKNOWN\n", "PROXY TCP4 wrong 91.227.77.177 3 443\n", "PROXY TCP4 198.51.100.1 91.227.77.177 3 443 EXTRA\n"):
             peer = self.proxy(header=header)
             self.assertEqual(peer.recv(1), b"")
         peer = socket.socket()

@@ -21,6 +21,12 @@ internal static class RemsupOperator
                 }
                 return 0;
             }
+            if (args[0]=="upload"||args[0]=="download") {
+                string host;int port;RemsupProtocol.ParseEndpoint(GetArg(args,"--relay")??RelayConfiguration.DefaultHost+":"+RelayConfiguration.DefaultPort,out host,out port);
+                string transferDeviceId=GetArg(args,"--id")??"";
+                Console.Write("Device password (not echoed): ");var password=new StringBuilder();while(true){var key=Console.ReadKey(true);if(key.Key==ConsoleKey.Enter)break;if(key.Key==ConsoleKey.Backspace){if(password.Length>0)password.Length--;}else if(!char.IsControl(key.KeyChar))password.Append(key.KeyChar);}Console.WriteLine();
+                using(var cancel=new System.Threading.CancellationTokenSource(TimeSpan.FromMinutes(30))){ConsoleCancelEventHandler handler=(sender,e)=>{e.Cancel=true;cancel.Cancel();};Console.CancelKeyPress+=handler;try{var transferResult=FileTransferConnection.Transfer(host,port,transferDeviceId,password.ToString(),GetArg(args,"--pin"),false,GetArg(args,"--local")??"",GetArg(args,"--remote")??"",args[0]=="upload",args.Contains("--overwrite"),cancel.Token,info=>Console.Write("\r{0}/{1} bytes",info.Completed,info.Size));Console.WriteLine("\nComplete {0} bytes SHA256 {1}",transferResult.Size,transferResult.Sha256);return 0;}finally{password.Clear();Console.CancelKeyPress-=handler;}}
+            }
             if (!args[0].Equals("exec", StringComparison.OrdinalIgnoreCase))
             {
                 PrintHelp();
@@ -66,7 +72,8 @@ internal static class RemsupOperator
         Console.WriteLine("Remsup Operator");
         Console.WriteLine();
         Console.WriteLine("Usage:");
-        Console.WriteLine("  RemsupOperator_v1.N.exe exec --relay HOST:443 --id \"841 602 345\" --otp PASSWORD --command \"hostname & whoami\" [--pin SHA256]");
+        Console.WriteLine("  upload|download --id ID --local ABSOLUTE_PATH --remote ABSOLUTE_PATH [--overwrite] [--relay HOST:443] [--pin SHA256]; password entered privately; Ctrl+C cancels");
+        Console.WriteLine("  RemsupOperator_v1.N.exe exec --relay HOST:443 --id \"841 602 999\" --otp PASSWORD --command \"hostname & whoami\" [--pin SHA256]");
     }
 
     private static string GetArg(string[] args, string name)

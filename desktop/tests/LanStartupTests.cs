@@ -31,16 +31,16 @@ internal static class LanStartupTests {
    diagnostics.Install("Installed","");Check(restored.Updates(true).last_install.result=="Installed","candidate reads predecessor committed outcome after startup");
    Check(RuntimeDiagnostics.SafeLanWarning("PASSWORD_SENTINEL path output")=="LAN diagnostics unavailable.","diagnostics reject arbitrary warning text");
    await VerifyLanRecovery();
-   string owned="Remsup LAN ABCDEF012345 192.0.2.34:8444";
+   string owned="Remsup LAN ABCDEF012345 172.16.0.34:8444";
    Check(LanAccessPolicy.ShouldRemoveRule(owned,"old.exe","new.exe",false),"update/install selects old executable rule for cleanup");
    Check(!LanAccessPolicy.ShouldRemoveRule(owned,"new.exe","new.exe",false),"migration keeps current executable rule");
    Check(LanAccessPolicy.ShouldRemoveRule(owned,"new.exe","new.exe",true),"Remove LAN rule removes current and historical owned rules");
    Check(!LanAccessPolicy.ShouldRemoveRule("Remsup LAN unrelated","old.exe","new.exe",true),"unrelated firewall names preserved");
-   var ip=IPAddress.Parse("192.0.2.34");
+   var ip=IPAddress.Parse("172.16.0.34");
    Check(LanAccessPolicy.UnavailableReason(ip,8444,_=>true,_=>"Public",(_,__)=>true).Contains("Public"),"Public profile warning identifies Windows Settings action");
    Check(LanAccessPolicy.UnavailableReason(ip,8444,_=>true,_=>"Private",(_,__)=>false).Contains("Prepare LAN firewall"),"missing scoped rule warning names Prepare action");
    Check(LanAccessPolicy.UnavailableReason(ip,8444,_=>true,_=>"Private",(_,__)=>true)=="","ready LAN requires active Private interface and scoped rule");
-   File.WriteAllText(Path.Combine(args[0],"settings.txt"),"RelayPort=8443\nLanEnabled=True\nLanAddress=192.0.2.254\nLanPort=8444\nPermanentPassword=synthetic-only\n");
+   File.WriteAllText(Path.Combine(args[0],"settings.txt"),"RelayPort=8443\nLanEnabled=True\nLanAddress=172.16.250.254\nLanPort=8444\nPermanentPassword=synthetic-only\n");
    using var host=new HostController(new HostOptions(new[]{"--fixture-root",args[0],"--fixture-relay","127.0.0.1:"+relay.Port}),new Dialogs());await host.ReadyAsync();await Task.Delay(500);
    var state=JsonSerializer.SerializeToElement(host.Snapshot());Check(state.GetProperty("settings").GetProperty("relayPort").GetInt32()==443,"legacy8443 migrates to pinned TLS443");
    Check(state.TryGetProperty("lanWarning",out var warning)&&warning.GetString().Contains("inactive"),"stale LAN address produces independent specific warning");
@@ -49,8 +49,8 @@ internal static class LanStartupTests {
    Check(diagnostic.GetProperty("lan").GetProperty("enabled").GetBoolean()&&!diagnostic.GetProperty("lan").GetProperty("ready").GetBoolean()&&diagnostic.GetProperty("lan").GetProperty("warning").GetString().Contains("inactive"),"diagnostic wire distinguishes configured unavailable LAN from ready relay");
    var registrationDeadline=DateTime.UtcNow.AddSeconds(8);while(JsonSerializer.SerializeToElement(host.Snapshot()).GetProperty("receivingState").GetString()!="RelayWaiting"&&DateTime.UtcNow<registrationDeadline)await Task.Delay(100);
    var result=await Task.Run(()=>OperatorConnection.ExecuteFixture("127.0.0.1",relay.Port,"111222333","fixture-password","echo relay-with-stale-lan",5,1024,CancellationToken.None,null));Check(result.ExitCode==0&&result.Stdout.Contains("relay-with-stale-lan"),"real relay command succeeds with stale LAN settings");
-   await host.HandleAsync("settings.save",Payload(new{relayHost="91.227.77.177",relayPort=443,relayPin="",autoUpdates=true,autoStart=false,lanEnabled=true,lanAddress="192.0.2.253",lanPort=8444,allowScreenView=true,allowScreenControl=true,autoAcceptScreenSessions=true}));
-   state=JsonSerializer.SerializeToElement(host.Snapshot());Check(state.GetProperty("settings").GetProperty("lanEnabled").GetBoolean()&&state.GetProperty("settings").GetProperty("lanAddress").GetString()=="192.0.2.253","LAN opt-in/draft saved without blocking relay or changing Windows network");
+   await host.HandleAsync("settings.save",Payload(new{relayHost="91.227.77.177",relayPort=443,relayPin="",autoUpdates=true,autoStart=false,lanEnabled=true,lanAddress="172.16.250.253",lanPort=8444,allowScreenView=true,allowScreenControl=true,autoAcceptScreenSessions=true}));
+   state=JsonSerializer.SerializeToElement(host.Snapshot());Check(state.GetProperty("settings").GetProperty("lanEnabled").GetBoolean()&&state.GetProperty("settings").GetProperty("lanAddress").GetString()=="172.16.250.253","LAN opt-in/draft saved without blocking relay or changing Windows network");
    using var reopened=new HostController(new HostOptions(new[]{"--fixture-root",args[0]}),new Dialogs());Check(JsonSerializer.SerializeToElement(reopened.Snapshot()).GetProperty("settings").GetProperty("lanEnabled").GetBoolean(),"unavailable LAN preference remains saved after reopen");
   }catch(Exception ex){Console.Error.WriteLine(ex);Environment.ExitCode=1;}finally{app.Shutdown();}
  };app.Run();return Environment.ExitCode;}

@@ -141,7 +141,8 @@ class ScreenHttpTests(unittest.TestCase):
                     self.assertEqual(client.post("/mcp").status_code, 401)
                     listing = client.post("/mcp", headers={"Authorization": "Bearer owner-token", "Accept": "application/json, text/event-stream"}, json={"jsonrpc": "2.0", "id": 3, "method": "tools/list"}).json()["result"]["tools"]
                     tools = {tool["name"]: tool for tool in listing}
-                    self.assertEqual(set(tools["remsup_exec_command"]["inputSchema"]["properties"]), {"device_id", "otp", "command"})
+                    self.assertEqual(set(tools["remsup_exec_command"]["inputSchema"]["properties"]), {"device_id", "otp", "command", "execution_timeout_seconds"})
+                    self.assertEqual(set(tools["remsup_exec_command"]["inputSchema"]["required"]), {"device_id", "otp", "command"})
                     self.assertEqual(set(tools["remsup_diagnostics"]["inputSchema"]["properties"]), {"device_id", "otp"})
                     self.assertEqual(set(tools["remsup_screen_request"]["inputSchema"]["properties"]), {"device_id", "otp", "monitor_id", "control"})
                     self.assertEqual(set(tools["remsup_screen_capture"]["inputSchema"]["properties"]), {"session_id"})

@@ -17,13 +17,23 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         asyncio.get_running_loop().set_debug(False)
         spec=importlib.util.spec_from_file_location('operator_client',PATH)
         self.module=importlib.util.module_from_spec(spec);spec.loader.exec_module(self.module)
-        self.request={'operation':'exec','token':'TOKEN_SENTINEL','otp':'PASSWORD_SENTINEL','profile':{'Transport':'Relay','RelayMode':'Default','DeviceId':'123456789','Host':'','Port':0},'route':{'relay_host':'127.0.0.1','relay_port':8443,'profile_host':'relay.example.invalid','profile_port':443},'command':'echo once','timeout':5}
+        self.request={'operation':'exec','token':'TOKEN_SENTINEL','otp':'PASSWORD_SENTINEL','profile':{'Transport':'Relay','RelayMode':'Default','DeviceId':'123456789','Host':'','Port':0},'route':{'relay_host':'127.0.0.1','relay_port':8443,'profile_host':'91.227.77.177','profile_port':443},'command':'echo once','timeout':5}
     async def test_route_refused_before_command(self):
         calls=[]
         async def fake(name,args):
             calls.append(name);return {'ok':True,'relay_host':'wrong','relay_port':8443}
         with self.assertRaises(self.module.ClientError):await self.module.execute(self.request,fake)
         self.assertEqual(calls,['remsup_health'])
+    async def test_continuous_mouse_actions_pass_through_existing_consumer(self):
+        self.request.update(operation='screen',monitor_id='synthetic',screen_actions=[{'action':'capture'},*({'operation':'mouse','action':action,'frame_id':'frame','geometry_version':1,'x':10,'y':10,'scroll_steps':0} for action in ('left-down','move','left-up')),{'action':'close'}])
+        sent=[]
+        async def fake(name,args):
+            if name=='remsup_screen_mouse':sent.append(args);return {'result':'applied'}
+            return {'remsup_health':{'ok':True,'relay_host':'127.0.0.1','relay_port':8443},'remsup_screen_capabilities':{'available':True,'monitors':[{'monitor_id':'synthetic'}]},'remsup_screen_request':{'session_id':'session'},'remsup_screen_status':{'state':'Granted','can_view':True,'can_control':True},'remsup_screen_capture':{'frame_id':'frame','geometry_version':1},'remsup_screen_close':{}}[name]
+        await self.module.execute(self.request,fake)
+        self.assertEqual([v['action'] for v in sent],['left-down','move','left-up'])
+        self.assertTrue(all(v['session_id']=='session' and v['frame_id']=='frame' and v['geometry_version']==1 for v in sent))
+
     async def test_exec_uses_only_requested_command(self):
         calls=[]
         async def fake(name,args):
@@ -292,6 +302,10 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             output=self.module.sanitize(result,self.request)
             self.assertIn('[REDACTED]',output);self.assertNotIn('PASSWORD_SENTINEL',output);self.assertNotIn('TOKEN_SENTINEL',output)
             self.assertEqual(result['result']['exit_code'],0)
+            self.request.update(command='fixture-delay',timeout=1,execution_timeout_seconds=3)
+            delayed=await self.module.sdk_run(self.request,f'http://127.0.0.1:{port}/mcp')
+            self.assertEqual(delayed['result']['exit_code'],0)
+            self.request.pop('execution_timeout_seconds');self.request['timeout']=5
             self.request['operation']='diagnostics'
             self.assertIn('diagnostics',await self.module.sdk_run(self.request,f'http://127.0.0.1:{port}/mcp'))
             self.request['command']='fixture-busy'
@@ -303,7 +317,7 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn('TOKEN_SENTINEL',repr(failure.exception))
             self.request['operation']='health'
             health=await self.module.sdk_run(self.request,f'http://127.0.0.1:{port}/mcp')
-            self.assertEqual(health['health']['command_count'],2)
+            self.assertEqual(health['health']['command_count'],3)
             self.request.update(operation='screen',monitor_id='synthetic',screen_actions=[{'action':'capture'},{'action':'text','text':'synthetic','frame_id':'synthetic-frame','geometry_version':1}])
             with self.assertRaises(BaseExceptionGroup) as refusal:
                 await self.module.sdk_run(self.request,f'http://127.0.0.1:{port}/mcp')
@@ -333,5 +347,38 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.module,'sdk_run',refused),patch.object(self.module,'tunnel',endpoint),patch.object(sys,'stdin',io.StringIO(json.dumps(self.request)+'\n')),patch.object(sys,'stdout',output):
             self.assertEqual(await asyncio.to_thread(self.module.main),1)
         self.assertNotIn('TOKEN_SENTINEL',output.getvalue());self.assertNotIn('PASSWORD_SENTINEL',output.getvalue());self.assertIn('auth-or-transport-failure',output.getvalue())
+
+    async def test_file_permission_refusal_is_reported_without_leaking_unknown_errors(self):
+        import io,json
+        with patch.object(sys,'path',[str(PATH.parent),*sys.path]):
+            from file_local import LocalFileError
+            self.request.update(operation='upload',config={})
+            @contextlib.contextmanager
+            def endpoint(_):yield 'https://fixture.invalid/mcp'
+            for detail,expected in [('permission-required','permission-required'),('PASSWORD_SENTINEL','transfer-failed')]:
+                async def refused(*args):raise ExceptionGroup('fixture',[LocalFileError(detail)])
+                output=io.StringIO()
+                with patch.object(self.module,'sdk_run',refused),patch.object(self.module,'tunnel',endpoint),patch.object(sys,'stdin',io.StringIO(json.dumps(self.request)+'\n')),patch.object(sys,'stdout',output):
+                    self.assertEqual(await asyncio.to_thread(self.module.main),1)
+                result=json.loads(output.getvalue())
+                self.assertEqual(result['error'],expected)
+                self.assertNotIn('PASSWORD_SENTINEL',output.getvalue())
+
+    async def test_file_status_and_cancel_routes_execute(self):
+        import io,json
+        calls=[]
+        async def sdk_mock(req,ep):
+            calls.append(req['operation'])
+            return {'status':'ok','transfer_id':req['transfer_id']}
+        for op in ['status','cancel']:
+            self.request.update(operation=op,transfer_id='11122233-4455-6677-8899-aabbccddeeff',config={})
+            output=io.StringIO()
+            @contextlib.contextmanager
+            def endpoint(_):yield 'https://fixture.invalid/mcp'
+            with patch.object(self.module,'sdk_run',sdk_mock),patch.object(self.module,'tunnel',endpoint),patch.object(sys,'stdin',io.StringIO(json.dumps(self.request)+'\n')),patch.object(sys,'stdout',output):
+                self.assertEqual(await asyncio.to_thread(self.module.main),0)
+            res=json.loads(output.getvalue())
+            self.assertTrue(res['ok'])
+        self.assertEqual(calls,['status','cancel'])
 
 if __name__=='__main__':unittest.main()

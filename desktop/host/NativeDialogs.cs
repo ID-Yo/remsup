@@ -2,6 +2,7 @@ using System;
 using System.Windows;
 using System.Windows.Controls;
 internal interface IHostDialogs {
+ string FilePath(bool upload)=>null;
  InstallChoice Install(string path)=>null;
  bool? Uninstall()=>null;
  bool Confirm(string title,string text);
@@ -13,6 +14,7 @@ internal interface IHostDialogs {
 internal sealed class NativeDialogs:IHostDialogs {
  readonly Window owner;readonly Func<bool> dark;
  internal NativeDialogs(Window window,Func<bool> theme=null){owner=window;dark=theme??(()=>false);}
+ public string FilePath(bool upload){if(upload){var dialog=new Microsoft.Win32.OpenFileDialog{Title="Choose the authorized file to upload",CheckFileExists=true,Multiselect=false};return dialog.ShowDialog(owner)==true?dialog.FileName:null;}else{var dialog=new Microsoft.Win32.SaveFileDialog{Title="Choose download destination",OverwritePrompt=false};return dialog.ShowDialog(owner)==true?dialog.FileName:null;}}
  public bool? Uninstall(){
   var window=NativeTheme.Dialog(owner,"Uninstall Remsup",dark());var body=NativeTheme.Body();body.Children.Add(NativeTheme.Label("Stop Remsup and remove its installed app, startup entry and shortcuts. Settings and saved devices are kept by default."));var remove=new CheckBox{Content="Also delete settings and saved devices",IsChecked=false,MinHeight=44,Foreground=window.Foreground};body.Children.Add(remove);var row=NativeTheme.Row();row.Children.Add(NativeTheme.Cancel(window));row.Children.Add(NativeTheme.Primary(window,"Uninstall"));NativeTheme.Layout(window,body,row);return window.ShowDialog()==true?remove.IsChecked==true:null;
  }
@@ -22,7 +24,7 @@ internal sealed class NativeDialogs:IHostDialogs {
   return window.ShowDialog()==true?new InstallChoice{Desktop=desktop.IsChecked==true,StartMenu=start.IsChecked==true}:null;
  }
  public bool Confirm(string title,string text){
-  var window=NativeTheme.Dialog(owner,title,dark());var body=NativeTheme.Body();body.Children.Add(NativeTheme.Label(text));var row=NativeTheme.Row();bool close=title=="Close active session";string action=close?"Disconnect and close":title=="Remove saved device"?"Remove device":title=="Scoped LAN firewall"?(text.StartsWith("Remove")?"Remove rule":"Prepare rule"):title=="Connect to device"?"Connect":title=="Uninstall Remsup"?"Uninstall":"Run command";var cancel=NativeTheme.Cancel(window,close?"Keep open":"Cancel");row.Children.Add(cancel);row.Children.Add(NativeTheme.Primary(window,action));NativeTheme.Layout(window,body,row);window.Loaded+=(_,__)=>cancel.Focus();return window.ShowDialog()==true;
+  var window=NativeTheme.Dialog(owner,title,dark());var body=NativeTheme.Body();body.Children.Add(NativeTheme.Label(text));var row=NativeTheme.Row();bool close=title=="Close active session";string action=close?"Disconnect and close":title=="Remove saved device"?"Remove device":title=="Scoped LAN firewall"?(text.StartsWith("Remove")?"Remove rule":"Prepare rule"):title=="Connect to device"?"Connect":title=="Uninstall Remsup"?"Uninstall":title=="Transfer file"?"Transfer":"Run command";var cancel=NativeTheme.Cancel(window,close?"Keep open":"Cancel");row.Children.Add(cancel);row.Children.Add(NativeTheme.Primary(window,action));NativeTheme.Layout(window,body,row);window.Loaded+=(_,__)=>cancel.Focus();return window.ShowDialog()==true;
  }
  public string Credential(string title,string existing){
   var window=NativeTheme.Dialog(owner,title,dark());var body=NativeTheme.Body();body.Children.Add(NativeTheme.Label(title.StartsWith("Password for ")?"Enter the password for "+title.Substring(13)+".":title=="Receiving password"?"Set a permanent password for receiving support.":"Enter the device's permanent password."));var box=new PasswordBox{Password=existing??""};body.Children.Add(NativeTheme.Input(window,box));var row=NativeTheme.Row();row.Children.Add(NativeTheme.Cancel(window));var use=NativeTheme.Primary(window,"Use password");use.IsDefault=true;row.Children.Add(use);NativeTheme.Layout(window,body,row);window.Loaded+=(_,__)=>box.Focus();bool accepted=window.ShowDialog()==true;string result=accepted?box.Password:null;box.Clear();return result;

@@ -10,6 +10,38 @@ using Microsoft.Web.WebView2.Core;
 using Microsoft.Web.WebView2.Wpf;
 internal static class ModernProgram {
  internal static ApplicationInstance CurrentInstance;
+ internal static string ResolveRuntimeFolder(string overrideFolder=null,string exePath=null,string baseDir=null){
+  if(!string.IsNullOrEmpty(overrideFolder)){
+   string fullOverride=Path.GetFullPath(overrideFolder);
+   if(!Directory.Exists(fullOverride)||!File.Exists(Path.Combine(fullOverride,"msedgewebview2.exe"))){
+    throw new InvalidOperationException($"The specified WebView2 runtime folder '{overrideFolder}' does not exist or is missing msedgewebview2.exe.");
+   }
+   return fullOverride;
+  }
+  string path=exePath;
+  if(string.IsNullOrEmpty(path)){
+   try{path=Environment.ProcessPath;}catch{}
+   if(string.IsNullOrEmpty(path)){try{path=Process.GetCurrentProcess().MainModule?.FileName;}catch{}}
+  }
+  string exeDir=!string.IsNullOrEmpty(path)?Path.GetDirectoryName(path):null;
+  string fallbackDir=!string.IsNullOrEmpty(baseDir)?baseDir:AppContext.BaseDirectory;
+  string exeWv=!string.IsNullOrEmpty(exeDir)?Path.Combine(exeDir,"runtimes","webview2"):null;
+  string baseWv=!string.IsNullOrEmpty(fallbackDir)?Path.Combine(fallbackDir,"runtimes","webview2"):null;
+
+  bool isAdjacentBundled=exeWv!=null&&(Directory.Exists(exeWv)||File.Exists(Path.Combine(exeWv,UserInstallation.RuntimeManifestName)));
+  if(isAdjacentBundled){
+   if(File.Exists(Path.Combine(exeWv,"msedgewebview2.exe")))return exeWv;
+   throw new InvalidOperationException("The app-local WebView2 runtime package is incomplete or missing msedgewebview2.exe. Silent system fallback is disabled for bundled runtime builds.");
+  }
+
+  bool isBaseBundled=baseWv!=null&&(Directory.Exists(baseWv)||File.Exists(Path.Combine(baseWv,UserInstallation.RuntimeManifestName)));
+  if(isBaseBundled){
+   if(File.Exists(Path.Combine(baseWv,"msedgewebview2.exe")))return baseWv;
+   throw new InvalidOperationException("The app-local WebView2 runtime package is incomplete or missing msedgewebview2.exe. Silent system fallback is disabled for bundled runtime builds.");
+  }
+
+  return null;
+ }
  [STAThread] static void Main(string[] args){
   try{
    RuntimeSetup.Initialize();
@@ -36,7 +68,9 @@ internal sealed class ModernWindow:Window {
  }
  async System.Threading.Tasks.Task InitializeAsync(){
   try{
-   assets=new EmbeddedUi();Content=view;var environment=await CoreWebView2Environment.CreateAsync(options.RuntimeFolder,options.UserData);await view.EnsureCoreWebView2Async(environment);if(closing)return;
+    assets=new EmbeddedUi();Content=view;
+    string runtime=ModernProgram.ResolveRuntimeFolder(options.RuntimeFolder);
+    var environment=await CoreWebView2Environment.CreateAsync(runtime,options.UserData);await view.EnsureCoreWebView2Async(environment);if(closing)return;
    var core=view.CoreWebView2;
    core.Settings.AreHostObjectsAllowed=false;core.Settings.AreDevToolsEnabled=false;core.Settings.AreDefaultContextMenusEnabled=false;core.Settings.AreDefaultScriptDialogsEnabled=false;core.Settings.IsStatusBarEnabled=false;
    core.NavigationStarting+=(_,e)=>{if(e.Uri!=BridgePolicy.Document){e.Cancel=true;return;}if(navigated){e.Cancel=true;FailRenderer();return;}navigated=true;};core.NavigationCompleted+=(_,e)=>{if(!fatal&&!closing)core.PostWebMessageAsJson(JsonSerializer.Serialize(new{type="context",context=gate.Context}));};core.FrameNavigationStarting+=(_,e)=>e.Cancel=true;core.NewWindowRequested+=(_,e)=>e.Handled=true;core.PermissionRequested+=(_,e)=>e.State=CoreWebView2PermissionState.Deny;core.DownloadStarting+=(_,e)=>e.Cancel=true;

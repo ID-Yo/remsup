@@ -49,7 +49,7 @@ internal sealed class ScreenConsentWindow:Window
         stop.Click+=(_,__)=>{access.Stop();Revoked?.Invoke();Refresh();};
         timer.Interval=TimeSpan.FromMilliseconds(500);timer.Tick+=(_,__)=>Refresh();
         IsVisibleChanged+=(_,__)=>{if(IsVisible)timer.Start();};
-        Closed+=(_,__)=>{timer.Stop();access.Stop();Revoked?.Invoke();};
+        Closed+=(_,__)=>{access.Stop();Revoked?.Invoke();if(!access.HasPendingRelease)timer.Stop();};
         Refresh();
     }
     static SolidColorBrush Brush(string color)=>new SolidColorBrush((Color)ColorConverter.ConvertFromString(color));
@@ -71,6 +71,7 @@ internal sealed class ScreenConsentWindow:Window
     }
     internal void Refresh()
     {
+        if(!IsVisible && !access.HasPendingRelease){timer.Stop();return;}
         try{access.RefreshEnvironment();}catch(InvalidOperationException){access.Stop();}
         var snapshot=access.Snapshot;
         displayed=snapshot.SessionId;

@@ -54,6 +54,12 @@ internal static class NativeTypingTests
 
     static int Validate()
     {
+        var foreground=new IntPtr(10);
+        Check(WindowsScreenSurface.ConsoleContext(true,"ConsoleWindowClass",true,true,true,true,foreground,foreground,IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,0),"eligible classic console has explicit target kind with zero child focus");
+        foreach(int failure in Enumerable.Range(0,9))Check(!WindowsScreenSurface.ConsoleContext(failure!=0,failure==1?"ordinary-window":"ConsoleWindowClass",failure!=2,failure!=3,failure!=4,failure!=5,foreground,failure==6?new IntPtr(11):foreground,failure==7?new IntPtr(1):IntPtr.Zero,IntPtr.Zero,IntPtr.Zero,failure==8?1u:0u),"console rejects failed query/unknown class/host/foreign user/elevation/session/conflicting context "+failure);
+        Check(!WindowsScreenSurface.ConsoleContext(true,"ConsoleWindowClass",true,true,true,true,foreground,foreground,new IntPtr(1),IntPtr.Zero,IntPtr.Zero,0),"console rejects active pointer capture on console");
+        Check(!WindowsScreenSurface.ConsoleContext(true,"ConsoleWindowClass",true,true,true,true,foreground,foreground,IntPtr.Zero,new IntPtr(1),IntPtr.Zero,0),"console rejects active menu owner on console");
+        Check(!WindowsScreenSurface.ConsoleContext(true,"ConsoleWindowClass",true,true,true,true,foreground,foreground,IntPtr.Zero,IntPtr.Zero,new IntPtr(1),0),"console rejects active window move/resize on console");
         string[] expected = {
             "ctrl+l", "ctrl+a", "ctrl+s", "ctrl+shift+s", "enter", "tab", "shift+tab",
             "escape", "backspace", "delete", "up", "down", "left", "right", "home", "end"

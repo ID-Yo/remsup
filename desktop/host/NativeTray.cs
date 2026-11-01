@@ -46,7 +46,7 @@ internal sealed class NativeTray:IDisposable {
   if(taskbarCreated!=0&&message==taskbarCreated&&visible){visible=false;if(!Show())show();return IntPtr.Zero;}
   if(message!=Callback||!visible)return IntPtr.Zero;int notification=(int)(lParam.ToInt64()&0xffff);handled=true;
   if(notification==0x400||notification==0x401||notification==0x203)owner.Dispatcher.BeginInvoke(show);
-  else if(notification==0x7b){int x=(short)(wParam.ToInt64()&0xffff),y=(short)((wParam.ToInt64()>>16)&0xffff);if(x==-1&&y==-1&&GetCursorPos(out var point)){x=point.x;y=point.y;}Menu(x,y);}
+  else if(notification==0x7b||notification==0x205){int x=(short)(wParam.ToInt64()&0xffff),y=(short)((wParam.ToInt64()>>16)&0xffff);if((x==-1&&y==-1)||notification==0x205){if(GetCursorPos(out var point)){x=point.x;y=point.y;}}Menu(x,y);}
   return IntPtr.Zero;
  }
  void Menu(int x,int y){

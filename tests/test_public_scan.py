@@ -8,5 +8,6 @@ class ScanTests(unittest.TestCase):
   self.assertEqual(result,[('source.txt',1,'credential-token')]);self.assertNotIn(value,str(result))
  def test_excluded_file_and_nontext(self):
   self.assertIn(('releases/client.exe',0,'excluded-file'),scan.inspect('releases/client.exe',b'\xff'))
+  self.assertEqual(scan.inspect('assets/remsup.ico',b'test'),[])
  def test_public_placeholders(self):
   self.assertEqual(scan.inspect('config.txt',b'relay.example.invalid <device-id> <token>'),[])

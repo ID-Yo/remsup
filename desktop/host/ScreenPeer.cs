@@ -9,7 +9,7 @@ internal sealed class ScreenRefusalException:IOException {internal ScreenRefusal
 // Persistent controlled-test channel. Local owner configuration/consent grants rights after pairing.
 internal sealed class ScreenPeer:IDisposable
 {
-    readonly TcpClient client=new TcpClient();internal readonly SemaphoreSlim Gate=new SemaphoreSlim(1,1);Stream stream;internal Guid Lease;internal string State="Off";internal bool View,Control;internal JsonElement Frame;internal byte[] Png;
+    readonly TcpClient client=new TcpClient();internal readonly SemaphoreSlim Gate=new SemaphoreSlim(1,1);Stream stream;internal Guid Lease;internal string State="Off";internal bool View,Control,Continuous,CadenceSet;internal JsonElement Frame;internal byte[] Png;
     internal void Connect(string host,int port,string id,string password,CancellationToken token,string pin=null,bool isLan=false)
     {ConnectCore(host,port,id,password,token,pin,isLan,false);}
     internal void ConnectFixture(string host,int port,string id,string password,CancellationToken token)

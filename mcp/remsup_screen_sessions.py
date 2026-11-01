@@ -212,7 +212,7 @@ class ScreenSessions:
             if not caller or entry is None or entry["caller"] != caller:
                 raise PermissionError("screen-session-unavailable")
             request_id = str(uuid.uuid4())
-            if operation not in ("status", "capture", "mouse", "text", "key", "close", "settings.read", "settings.set"):
+            if operation not in ("status", "capture", "mouse", "text", "key", "close", "settings.read", "settings.set", "cadence"):
                 raise ValueError("invalid-screen-operation")
             if operation == 'settings.read':
                 if fields:
@@ -224,6 +224,11 @@ class ScreenSessions:
                     validate_setting(fields['name'], fields['value'])
                 except ValueError as exc:
                     return self._settings_response(session_id, request_id, entry, str(exc))
+            elif operation == "cadence":
+                if set(fields) != {"interval_ms"}:
+                    raise ValueError("invalid-screen-input")
+                if type(fields["interval_ms"]) is not int or not 50 <= fields["interval_ms"] <= 1000:
+                    raise ValueError("interval-out-of-range")
             elif operation in ("text", "key"):
                 if set(fields) != {"frame_id", "geometry_version", operation}:
                     raise ValueError("invalid-screen-input")
@@ -245,7 +250,7 @@ class ScreenSessions:
                         raise ValueError("invalid-screen-input")
                 if fields["geometry_version"] < 1 or not 0 <= fields["x"] < 1920 or not 0 <= fields["y"] < 1920:
                     raise ValueError("invalid-screen-input")
-                if fields["action"] not in ("click", "double-click", "right-click", "scroll"):
+                if fields["action"] not in ("click", "double-click", "right-click", "scroll", "move", "down", "up", "left-down", "left-up", "right-down", "right-up", "middle-down", "middle-up"):
                     raise ValueError("invalid-screen-input")
                 if fields["action"] == "scroll":
                     if not -10 <= fields["scroll_steps"] <= 10 or fields["scroll_steps"] == 0:
@@ -329,6 +334,12 @@ class ScreenSessions:
                         raise ValueError('screen-response-mismatch')
                     entry['last']=self._clock()
                     return {'error':response['error'],'dispatched':dispatched,'channel_terminated':False,'warning':'Do not retry automatically; take and inspect a new capture.'}
+                if operation == "cadence":
+                    if not self._permission_deadline(entry, response):
+                        self._drop(session_id, 'permission-ended')
+                        raise ConfirmedInputRefusal('permission-ended', True)
+                    entry['last'] = self._clock()
+                    return {'version': 1, 'request_id': request['request_id'], 'session_id': session_id, 'interval_ms': response.get('interval_ms', fields['interval_ms']), 'ok': True}
                 entry["last"] = self._clock()
                 if operation == "close" or (operation != "capture" and not self._permission_deadline(entry, response)):
                     self._drop(session_id,'closed' if operation=='close' else 'permission-ended')

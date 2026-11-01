@@ -7,6 +7,6 @@
     <StartupObject>UpdateProcessTests</StartupObject>
   </PropertyGroup>
   <ItemGroup>
-    <Compile Include="UpdateProcessTests.cs;../host/UpdateBootstrap.cs;../host/HostUpdateHandoff.cs;../host/UpdateManager.cs;../../shared/ApplicationInstance.cs" />
+    <Compile Include="UpdateProcessTests.cs;../host/UpdateBootstrap.cs;../host/HostUpdateHandoff.cs;../host/UpdateManager.cs;../host/UserInstallation.cs;../../shared/ApplicationInstance.cs" />
   </ItemGroup>
 </Project>

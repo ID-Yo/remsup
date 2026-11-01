@@ -32,7 +32,7 @@ internal static class DeviceStoreTests
         var path = Path.Combine(root, "roundtrip", "devices.json");
         var store = new DeviceStore(path);
         var snapshot = store.Load();
-        var record = NewRecord("345 345 345", "relay.example.test", 8443);
+        var record = NewRecord("841 602 999", "relay.example.test", 8443);
         record.DisplayName = "Test support device";
         record.Note = "office workstation";
         record.IsFavorite = true;
@@ -53,7 +53,7 @@ internal static class DeviceStoreTests
         Check(loaded.Records.Count == 1, "one device must round trip");
         var saved = loaded.Records[0];
         Check(saved.RecordId == record.RecordId, "record identity must round trip");
-        Check(saved.DeviceId == "345345345", "device id must be normalized");
+        Check(saved.DeviceId == "841602999", "device id must be normalized");
         Check(saved.DisplayName == record.DisplayName && saved.Note == record.Note, "metadata must round trip");
         Check(saved.Transport == DeviceTransport.Relay && saved.Host == "relay.example.test" && saved.Port == 8443, "endpoint must round trip");
         Check(saved.IsFavorite, "favorite state must round trip");
@@ -141,7 +141,7 @@ internal static class DeviceStoreTests
         var path = Path.Combine(root, "duplicates", "devices.json");
         var store = new DeviceStore(path);
         var snapshot = store.Load();
-        var original = NewRecord("345 345 345", "Relay.Example.Test.", 8443);
+        var original = NewRecord("841 602 999", "Relay.Example.Test.", 8443);
         snapshot.Upsert(original);
         original.DisplayName = "mutated outside snapshot";
         Check(snapshot.Find(original.RecordId).DisplayName == "Device", "upsert must clone input records");
@@ -155,7 +155,7 @@ internal static class DeviceStoreTests
         duplicates[0].DisplayName = "mutation of returned match";
         Check(snapshot.Find(duplicates[0].RecordId).DisplayName == "Device", "duplicate results must be cloned");
 
-        var sameId = NewRecord("345345345", "other.example.test", 9443);
+        var sameId = NewRecord("841602999", "other.example.test", 9443);
         Check(snapshot.FindDuplicates(sameId).Count == 1, "duplicate search must normalize device id formatting");
         var updated = snapshot.Find(original.RecordId);
         updated.DisplayName = "updated";

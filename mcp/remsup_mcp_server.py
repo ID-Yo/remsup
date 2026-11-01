@@ -5,11 +5,13 @@ import hashlib
 import re
 import asyncio
 import inspect
+import secrets
 from functools import partial, wraps
 import anyio
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
-from typing import Union
+from typing import Annotated, Union
+from pydantic import Field
 
 from mcp.server.auth.provider import AccessToken, TokenVerifier
 from mcp.server.auth.settings import AuthSettings
@@ -17,8 +19,11 @@ from mcp.server.fastmcp import FastMCP
 from mcp.server.auth.middleware.auth_context import get_access_token
 from mcp.types import ImageContent, TextContent
 
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+from remsup_file_transfer import FileWire, Transfers, TransferError, CHUNK
 from remsup_config import RemsupMcpConfig, load_config
-from remsup_relay_client import DiagnosticsError, diagnostics_over_relay, exec_command_over_relay, normalize_device_id, validate_diagnostics_credentials
+from remsup_relay_client import open_operator_socket, DiagnosticsError, diagnostics_over_relay, exec_command_over_relay, normalize_device_id, validate_diagnostics_credentials
 from remsup_screen_sessions import ScreenSessions, ConfirmedInputRefusal, SETTINGS_TYPES, failure_code
 from remsup_screen_transport import connect_screen
 
@@ -173,6 +178,7 @@ async def screen_lifespan(_):
         while True:
             await asyncio.sleep(1)
             await asyncio.to_thread(SCREEN.heartbeat)
+            await asyncio.to_thread(FILES.cleanup)
     task = asyncio.create_task(cleanup())
     try:
         yield {}
@@ -183,6 +189,7 @@ async def screen_lifespan(_):
         except asyncio.CancelledError:
             pass
         SCREEN.close_all()
+        FILES.cleanup(all=True)
 
 
 class RemsupFastMCP(FastMCP):
@@ -289,6 +296,12 @@ def remsup_screen_key(session_id: str, frame_id: str, geometry_version: int, key
 
 
 @MCP.tool()
+def remsup_screen_cadence(session_id: str, interval_ms: int) -> dict:
+    """Configure the streaming capture cadence (50ms to 1000ms) for an active granted screen session."""
+    return screen_call("cadence", lambda caller: SCREEN.operation(caller, session_id, "cadence", interval_ms=interval_ms))
+
+
+@MCP.tool()
 def remsup_screen_close(session_id: str) -> dict:
     return screen_call("close", lambda caller: SCREEN.operation(caller, session_id, "close"))
 
@@ -354,7 +367,7 @@ def remsup_health() -> dict:
 
 
 @MCP.tool()
-def remsup_exec_command(device_id: str, otp: str, command: str) -> dict:
+def remsup_exec_command(device_id: str, otp: str, command: str, execution_timeout_seconds: Annotated[int, Field(strict=True, ge=1, le=300)] | None = None) -> dict:
     clean_id = normalize_device_id(device_id)
     started = time.monotonic()
     exit_code = 1
@@ -364,13 +377,16 @@ def remsup_exec_command(device_id: str, otp: str, command: str) -> dict:
     error = ""
 
     try:
+        execution_timeout = CONFIG.command_timeout_seconds if execution_timeout_seconds is None else execution_timeout_seconds
+        if type(execution_timeout) is not int or not 1 <= execution_timeout <= 300:
+            raise ValueError('execution_timeout_seconds must be an integer between 1 and 300')
         result = exec_command_over_relay(
             CONFIG.relay_host,
             CONFIG.relay_port,
             clean_id,
             otp,
             command,
-            CONFIG.command_timeout_seconds,
+            execution_timeout,
             CONFIG.max_output_bytes,
         )
         exit_code = int(result["exit_code"])
@@ -433,6 +449,77 @@ def remsup_diagnostics(device_id: str, otp: str) -> dict:
             "duration_ms": int((time.monotonic() - started) * 1000),
         })
 
+
+def connect_file(device_id,otp):
+    # Production server's relay backend is on the same host or configured relay host.
+    allowed = {'127.0.0.1', '::1', 'localhost', '91.227.77.177'}
+    if getattr(CONFIG, 'relay_host', None):
+        allowed.add(CONFIG.relay_host)
+    if not CONFIG.relay_host or CONFIG.relay_host not in allowed:
+        raise TransferError('device-unavailable')
+    return FileWire(open_operator_socket(CONFIG.relay_host,CONFIG.relay_port,device_id,otp,timeout=15,bounded_handshake=True))
+
+FILES = Transfers(connect_file)
+
+def file_call(action):
+    try:return action()
+    except TransferError as ex:return {'status':'error','error_code':ex.code}
+    except (ValueError,TypeError):return {'status':'error','error_code':'invalid-metadata'}
+    except Exception:return {'status':'error','error_code':'interrupted'}
+
+@MCP.tool()
+def remsup_file_begin(device_id:str,otp:str,direction:str,remote_path:str,size:int|None=None,sha256:str|None=None,overwrite:bool=False)->dict:
+    """Begin an authorized transfer. Binary payloads use the protected local wrapper, never tool text."""
+    caller=screen_caller()
+    result=file_call(lambda:FILES.begin(caller,device_id,otp,direction,remote_path,size,sha256,overwrite))
+    append_audit({'tool':'remsup_file_begin','caller':hashlib.sha256(caller.encode()).hexdigest()[:12],'result_code':result.get('error_code','ok')})
+    return result
+
+@MCP.tool()
+def remsup_file_status(transfer_id:str)->dict:return file_call(lambda:FILES.status(screen_caller(),transfer_id))
+
+@MCP.tool()
+def remsup_file_finish(transfer_id:str)->dict:return file_call(lambda:FILES.finish(screen_caller(),transfer_id))
+
+@MCP.tool()
+def remsup_file_cancel(transfer_id:str)->dict:return file_call(lambda:FILES.cancel(screen_caller(),transfer_id))
+
+def file_http_caller(request):
+    authorization=request.headers.get('authorization','')
+    if not authorization.startswith('Bearer '):return None
+    provided=authorization[7:]
+    if len(provided)>4096:return None
+    for caller,token in CONFIG.client_tokens.items():
+        if secrets.compare_digest(provided,token):return caller
+    return None
+
+@MCP.custom_route('/files/{transfer_id}',methods=['POST','GET'])
+async def file_binary(request:Request):
+    caller=file_http_caller(request)
+    if caller is None:return JSONResponse({'error_code':'authenticated-caller-required'},status_code=401)
+    identifier=request.path_params['transfer_id']
+    try:
+        if len(identifier)!=36:raise TransferError('owner-mismatch')
+        offset=int(request.query_params.get('offset','-1'))
+        if request.method=='POST':
+            if request.headers.get('content-type')!='application/octet-stream':raise TransferError('invalid-chunk')
+            size=int(request.headers.get('content-length','0'))
+            if not 1<=size<=CHUNK:raise TransferError('invalid-chunk')
+            data=bytearray()
+            async with asyncio.timeout(20):
+                async for block in request.stream():
+                    if len(data)+len(block)>size:raise TransferError('invalid-chunk')
+                    data.extend(block)
+            if len(data)!=size:raise TransferError('invalid-chunk')
+            await asyncio.to_thread(FILES.chunk,caller,identifier,offset,bytes(data))
+            return JSONResponse(FILES.status(caller,identifier))
+        count=int(request.query_params.get('count','0'))
+        data=await asyncio.to_thread(FILES.chunk,caller,identifier,offset,None,count)
+        return Response(data,media_type='application/octet-stream',headers={'Cache-Control':'no-store'})
+    except (TransferError,ValueError,TimeoutError) as ex:
+        code=ex.code if isinstance(ex,TransferError) else 'invalid-chunk'
+        return JSONResponse({'error_code':code},status_code=409)
+    except Exception:return JSONResponse({'error_code':'interrupted'},status_code=409)
 
 if __name__ == "__main__":
     MCP.run(transport=CONFIG.transport)

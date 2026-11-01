@@ -8,9 +8,13 @@ screen_closes=0
 @mcp.tool()
 def remsup_health()->dict:return {'ok':True,'relay_host':'127.0.0.1','relay_port':8443,'command_count':len(commands),'screen_closes':screen_closes}
 @mcp.tool()
-def remsup_exec_command(device_id:str,otp:str,command:str)->dict:
+def remsup_exec_command(device_id:str,otp:str,command:str,execution_timeout_seconds:int|None=None)->dict:
     if otp!='PASSWORD_SENTINEL':raise ValueError('test credential mismatch')
     commands.append(command)
+    if command=='fixture-delay':
+        import time
+        time.sleep(2)
+        if execution_timeout_seconds!=3:raise ValueError('execution timeout missing')
     if command=='fixture-busy':raise ValueError('busy PASSWORD_SENTINEL TOKEN_SENTINEL')
     return {'device_id':device_id,'exit_code':0,'truncated':False,'stdout':'fixture\nfixture\\user' if command=='hostname & whoami' else 'PASSWORD_SENTINEL TOKEN_SENTINEL','stderr':''}
 @mcp.tool()

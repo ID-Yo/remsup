@@ -31,11 +31,12 @@ internal sealed class ScreenSession
     bool autoAccepted;
     long deadline;
     long grantedAt;
+    internal event Action Invalidated;
     public ScreenSession():this(MonotonicClock()){}
     internal ScreenSession(Func<long> clock){if(clock==null)throw new ArgumentNullException("clock");milliseconds=clock;}
     static Func<long> MonotonicClock(){var clock=Stopwatch.StartNew();return ()=>clock.ElapsedMilliseconds;}
     void Expire(){if((state==ScreenSessionState.Pending||state==ScreenSessionState.Granted)&&milliseconds()>=deadline)RevokeCore();}
-    void RevokeCore(){state=ScreenSessionState.Revoked;connection=null;monitor=null;requestedControl=false;control=false;deadline=0;}
+    void RevokeCore(){bool wasActive=state==ScreenSessionState.Granted;state=ScreenSessionState.Revoked;connection=null;monitor=null;requestedControl=false;control=false;deadline=0;if(wasActive){Action h=Invalidated;if(h!=null)try{h();}catch{}}}
     public ScreenSessionSnapshot Snapshot
     {
         get{lock(gate){Expire();return new ScreenSessionSnapshot(state,id,connection,monitor,requestedControl,control,Math.Max(0,deadline-milliseconds()),state==ScreenSessionState.Granted?Math.Max(0,milliseconds()-grantedAt):0,autoAccepted);}}
@@ -74,5 +75,5 @@ internal sealed class ScreenSession
     }
     public void Disconnect(string connectionId){lock(gate){if(connectionId==connection)RevokeCore();}}
     public void Revoke(){lock(gate)RevokeCore();}
-    public void DisableControl(){lock(gate){control=false;requestedControl=false;}}
+    public void DisableControl(){lock(gate){bool had=control;control=false;requestedControl=false;if(had){Action h=Invalidated;if(h!=null)try{h();}catch{}}}}
 }

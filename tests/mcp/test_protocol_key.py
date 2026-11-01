@@ -19,7 +19,7 @@ class ProtocolKeyTests(unittest.TestCase):
                 self.assertTrue(actual.isalpha())
 
     def test_normalize_device_id_keeps_digits_only(self):
-        self.assertEqual(normalize_device_id("345 345 345"), "345345345")
+        self.assertEqual(normalize_device_id("841 602 999"), "841602999")
 
 
 if __name__ == "__main__":

@@ -1,15 +1,22 @@
 param(
- [ValidateSet('health','exec','diagnostics','screen')][string]$Operation='health',
+ [ValidateSet('health','exec','diagnostics','screen','upload','download','cancel','status')][string]$Operation='health',
  [ValidatePattern('^[a-zA-Z0-9_-]{1,40}$')][string]$Agent='codex',
  [string]$Name,[string]$DeviceId,
  [string]$Command,[string]$CommandFile,[string]$MonitorId,[switch]$Control,[switch]$CapabilitiesOnly,
  [string]$ImageDirectory,[string]$ScreenActionsFile,[scriptblock]$ScreenHandler,
  [string]$Python,[string]$StorePath,[string]$CredentialFile,
  [ValidateRange(0,65535)][int]$LocalPort=0,
- [ValidateRange(1,90)][int]$TimeoutSeconds=45
+ [ValidateRange(1,90)][int]$TimeoutSeconds=45,
+ $ExecutionTimeoutSeconds,
+ [string]$LocalPath,[string]$RemotePath,[switch]$Overwrite,[string]$TransferId
 )
 $ErrorActionPreference='Stop'
-if($Operation -ne 'health' -and -not $Name){throw 'Device operations require exact profile'}
+if($PSBoundParameters.ContainsKey('ExecutionTimeoutSeconds')){
+ if($Operation -ne 'exec'){throw 'ExecutionTimeoutSeconds applies only to exec'}
+ if(($ExecutionTimeoutSeconds -isnot [int] -and $ExecutionTimeoutSeconds -isnot [long] -and $ExecutionTimeoutSeconds -isnot [string]) -or [string]$ExecutionTimeoutSeconds -notmatch '^[0-9]{1,3}$' -or [int]$ExecutionTimeoutSeconds -lt 1 -or [int]$ExecutionTimeoutSeconds -gt 300){throw 'ExecutionTimeoutSeconds requires an integer from 1 through 300'}
+ $ExecutionTimeoutSeconds=[int]$ExecutionTimeoutSeconds
+}
+if($Operation -ne 'health' -and $Operation -notin @('cancel','status') -and -not $Name){throw 'Device operations require exact profile'}
 if(-not $CredentialFile){$CredentialFile=Join-Path $env:USERPROFILE ".codex/secrets/remsup-mcp-$Agent.dpapi"}
 if(-not (Test-Path -LiteralPath $CredentialFile)){throw 'Protected MCP token file is missing for this Windows user. Run setup-remsup-mcp.ps1 with the administrator supplied token and route.'}
 . (Join-Path $PSScriptRoot 'mcp-runtime.ps1')
@@ -30,7 +37,10 @@ try {
  $request=@{operation=$Operation;token=$token;config=@{ssh_alias=$config.ssh_alias;endpoint=$config.endpoint;local_port=$port};route=$config.route;timeout=$TimeoutSeconds}
  if($Operation -eq 'exec'){
   $request.command=$Command
+  if($PSBoundParameters.ContainsKey('ExecutionTimeoutSeconds')){$request.execution_timeout_seconds=$ExecutionTimeoutSeconds}
  }
+ if($Operation -in @('cancel','status')){if(-not $TransferId){throw 'TransferId is required for cancel/status'};$request.transfer_id=$TransferId}
+ if($Operation -in @('upload','download')){if(-not $LocalPath -or -not $RemotePath){throw 'File transfer requires LocalPath and RemotePath'};$request.local_path=$LocalPath;$request.remote_path=$RemotePath;$request.overwrite=[bool]$Overwrite}
  if($Operation -eq 'screen'){
   $request.monitor_id=$MonitorId;$request.control=[bool]$Control;$request.capabilities_only=[bool]$CapabilitiesOnly;$request.image_directory=$ImageDirectory
   if($ScreenActionsFile){$request.screen_actions=@([IO.File]::ReadAllText((Resolve-Path -LiteralPath $ScreenActionsFile))|ConvertFrom-Json)}
@@ -57,7 +67,7 @@ try {
   try {
    $inputWriter.WriteLine(($request|ConvertTo-Json -Depth 12 -Compress))
    if(-not $request.interactive){$inputWriter.Close()}
-   $deadline=[DateTime]::UtcNow.AddSeconds($(if($request.interactive){650}else{[Math]::Min(320,$TimeoutSeconds*5+20)}))
+   $deadline=[DateTime]::UtcNow.AddSeconds($(if($Operation -in @('upload','download')){1850}elseif($Operation -eq 'exec'){$TimeoutSeconds*2+380}elseif($request.interactive){650}else{[Math]::Min(320,$TimeoutSeconds*5+20)}))
    $success=$false
    while($true){
     $read=$process.StandardOutput.ReadLineAsync();$remaining=[Math]::Max(1,[int]($deadline-[DateTime]::UtcNow).TotalMilliseconds)

@@ -14,6 +14,9 @@ using System.Windows.Media.Imaging;
 // only their separate test-owned child window; never capture a personal desktop.
 internal sealed class WindowsScreenSurface:IScreenSurface
 {
+    int heldMouseButtons = 0;
+    readonly HashSet<ushort> heldKeys = new HashSet<ushort>();
+    public bool HasPendingRelease{get{return heldMouseButtons!=0||heldKeys.Count!=0;}}
     [StructLayout(LayoutKind.Sequential)] struct Rect {public int Left,Top,Right,Bottom;}
     [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] struct MonitorInfo {public int Size;public Rect Monitor,Work;public uint Flags;[MarshalAs(UnmanagedType.ByValTStr,SizeConst=32)] public string Device;}
     delegate bool MonitorProc(IntPtr monitor,IntPtr dc,ref Rect bounds,IntPtr data);
@@ -48,6 +51,9 @@ internal sealed class WindowsScreenSurface:IScreenSurface
     internal static bool IsCloaked(IntPtr window){IntPtr root=GetAncestor(window,2);return root==IntPtr.Zero||DwmGetWindowAttribute(root,14,out int value,sizeof(int))!=0||value!=0;}
 
     [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread,ref GuiThreadInfo info);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window,StringBuilder name,int length);
+    [DllImport("advapi32.dll",SetLastError=true)] static extern bool OpenProcessToken(IntPtr process,uint access,out Microsoft.Win32.SafeHandles.SafeAccessTokenHandle token);
+    [DllImport("advapi32.dll",SetLastError=true)] static extern bool GetTokenInformation(Microsoft.Win32.SafeHandles.SafeAccessTokenHandle token,int kind,out int value,int bytes,out int needed);
     [DllImport("user32.dll")] static extern bool GetCursorPos(out NativePoint point);
     [DllImport("user32.dll")] static extern IntPtr GetThreadDesktop(uint thread);
     [DllImport("kernel32.dll")] static extern uint GetCurrentThreadId();
@@ -135,7 +141,20 @@ internal sealed class WindowsScreenSurface:IScreenSurface
     static uint Submit(Input[] events){int error;return Submit(events,out error);}
     static uint Submit(Input[] events,out int error){uint sent=SendInput((uint)events.Length,events,Marshal.SizeOf(typeof(Input)));error=Marshal.GetLastWin32Error();if(sent!=(uint)events.Length){try{File.WriteAllText(Path.Combine(Path.GetTempPath(),"RemsupScreenInput.log"),DateTime.UtcNow.ToString("o")+" submitted="+sent+" requested="+events.Length+" win32="+error+" outcome=unknown\n");}catch(IOException){}catch(UnauthorizedAccessException){}}return sent;}
     static Input KeyEvent(ushort key,ushort scan,uint flags){return new Input{Type=1,Data=new InputUnion{Keyboard=new KeyboardInput{VirtualKey=key,Scan=scan,Flags=flags}}};}
-    struct KeyboardTarget {public IntPtr Foreground,Focus;}
+    struct KeyboardTarget {public IntPtr Foreground,Focus;public uint Process,Thread;public long Started;public bool Console;}
+    internal static bool ConsoleContext(bool query,string windowClass,bool trustedHost,bool sameUser,bool standard,bool sameSession,IntPtr foreground,IntPtr active,IntPtr capture,IntPtr menu,IntPtr move,uint flags){return query&&windowClass=="ConsoleWindowClass"&&trustedHost&&sameUser&&standard&&sameSession&&(active==IntPtr.Zero||active==foreground)&&capture==IntPtr.Zero&&menu==IntPtr.Zero&&move==IntPtr.Zero&&flags==0;}
+    static bool ClassicConsole(IntPtr foreground,uint pid,GuiThreadInfo gui){
+        var name=new StringBuilder(128);if(GetClassName(foreground,name,name.Capacity)==0)return false;
+        try{using(var process=Process.GetProcessById((int)pid)){
+            string path=process.MainModule.FileName,system=Environment.GetFolderPath(Environment.SpecialFolder.System);
+            bool trusted=string.Equals(path,Path.Combine(system,"conhost.exe"),StringComparison.OrdinalIgnoreCase)||string.Equals(path,Path.Combine(system,"cmd.exe"),StringComparison.OrdinalIgnoreCase)||string.Equals(path,Path.Combine(system,"WindowsPowerShell","v1.0","powershell.exe"),StringComparison.OrdinalIgnoreCase);
+            if(!OpenProcessToken(process.Handle,8,out var token))return false;
+            using(token)using(var identity=new System.Security.Principal.WindowsIdentity(token.DangerousGetHandle()))using(var own=System.Security.Principal.WindowsIdentity.GetCurrent()){
+                bool queried=GetTokenInformation(token,20,out int elevated,4,out int needed)&&needed==4;
+                return ConsoleContext(queried,name.ToString(),trusted,identity.User==own.User,elevated==0,process.SessionId==Process.GetCurrentProcess().SessionId,foreground,gui.Active,gui.Capture,gui.MenuOwner,gui.MoveSize,gui.Flags);
+            }
+        }}catch(Exception ex) when(ex is ArgumentException||ex is System.ComponentModel.Win32Exception||ex is InvalidOperationException||ex is System.Security.SecurityException){return false;}
+    }
     KeyboardTarget ReadKeyboardTarget(ScreenGeometry geometry) {
         RequireDesktop();if(!geometry.Matches(Geometry(geometry.MonitorId)))throw new InvalidOperationException("geometry-changed");
         IntPtr foreground=GetForegroundWindow();uint pid=0;uint thread=foreground==IntPtr.Zero?0:GetWindowThreadProcessId(foreground,out pid);
@@ -144,14 +163,19 @@ internal sealed class WindowsScreenSurface:IScreenSurface
         var monitor=new MonitorInfo{Size=Marshal.SizeOf(typeof(MonitorInfo))};IntPtr monitorHandle=MonitorFromWindow(foreground,0);
         if(monitorHandle==IntPtr.Zero||!GetMonitorInfo(monitorHandle,ref monitor)||monitor.Device!=geometry.MonitorId)throw new InvalidOperationException("foreground-monitor-mismatch");
         var gui=new GuiThreadInfo{Size=Marshal.SizeOf(typeof(GuiThreadInfo))};
-        if(!GetGUIThreadInfo(thread,ref gui)||gui.Focus==IntPtr.Zero||!IsWindow(gui.Focus)||!IsWindowVisible(gui.Focus)||!IsWindowEnabled(gui.Focus))throw new InvalidOperationException("foreground-required");
+        if(!GetGUIThreadInfo(thread,ref gui))throw new InvalidOperationException("foreground-required");
+        if(gui.Focus==IntPtr.Zero){
+            if(!ClassicConsole(foreground,pid,gui))throw new InvalidOperationException("foreground-required");
+            using(var process=Process.GetProcessById((int)pid))return new KeyboardTarget{Foreground=foreground,Focus=IntPtr.Zero,Process=pid,Thread=thread,Started=process.StartTime.ToUniversalTime().Ticks,Console=true};
+        }
+        if(!IsWindow(gui.Focus)||!IsWindowVisible(gui.Focus)||!IsWindowEnabled(gui.Focus))throw new InvalidOperationException("foreground-required");
         uint focusPid; if(GetWindowThreadProcessId(gui.Focus,out focusPid)==0||focusPid==0)throw new InvalidOperationException("foreground-required");
         if(focusPid==(uint)Environment.ProcessId||IsCloaked(gui.Focus))throw new InvalidOperationException("protected-window");
-        return new KeyboardTarget{Foreground=foreground,Focus=gui.Focus};
+        using(var process=Process.GetProcessById((int)pid))return new KeyboardTarget{Foreground=foreground,Focus=gui.Focus,Process=pid,Thread=thread,Started=process.StartTime.ToUniversalTime().Ticks,Console=false};
     }
     void RequireKeyboardTarget(ScreenGeometry geometry,KeyboardTarget expected) {
         KeyboardTarget current=ReadKeyboardTarget(geometry);
-        if(current.Foreground!=expected.Foreground||current.Focus!=expected.Focus)throw new InvalidOperationException("keyboard-context-changed");
+        if(current.Foreground!=expected.Foreground||current.Focus!=expected.Focus||current.Console!=expected.Console||current.Process!=expected.Process||current.Thread!=expected.Thread||current.Started!=expected.Started)throw new InvalidOperationException("keyboard-context-changed");
     }
     static void RequireNoLocalModifiers() {
         foreach(int key in new[]{16,17,18,91,92,160,161,162,163,164,165})if((GetAsyncKeyState(key)&0x8000)!=0)throw new InvalidOperationException("local-input-active");
@@ -205,11 +229,27 @@ internal sealed class WindowsScreenSurface:IScreenSurface
     }
     public void Mouse(string action,ScreenPoint point,int scrollSteps,Action authorize)
     {
-        RequireDesktop();if(IsProtectedPoint(point))throw new InvalidOperationException("protected-window");
-        // Never combine remote actions with locally held modifiers or buttons.
-        foreach(int key in new[]{1,2,4,16,17,18,91,92})if((GetAsyncKeyState(key)&0x8000)!=0)throw new InvalidOperationException("local-input-active");
-        if(action!="click"&&action!="double-click"&&action!="right-click"&&action!="scroll")throw new InvalidOperationException("invalid-action");
+        RequireDesktop();
+        bool isContinuousMove=action=="move";
+        bool isButtonDown=action=="down"||action=="left-down"||action=="right-down"||action=="middle-down";
+        bool isButtonUp=action=="up"||action=="left-up"||action=="right-up"||action=="middle-up";
+        bool isButtonAction=isButtonDown||isButtonUp;
+        if(action!="click"&&action!="double-click"&&action!="right-click"&&action!="scroll"&&!isContinuousMove&&!isButtonAction)throw new InvalidOperationException("invalid-action");
         if(action=="scroll"?(scrollSteps==0||scrollSteps<-10||scrollSteps>10):scrollSteps!=0)throw new InvalidOperationException("invalid-scroll");
+
+        if(!isButtonUp)
+        {
+            if(IsProtectedPoint(point))throw new InvalidOperationException("protected-window");
+            foreach(int key in new[]{1,2,4,16,17,18,91,92}){
+                if((GetAsyncKeyState(key)&0x8000)!=0){
+                    if(key==1&&(heldMouseButtons&1)!=0)continue;
+                    if(key==2&&(heldMouseButtons&2)!=0)continue;
+                    if(key==4&&(heldMouseButtons&4)!=0)continue;
+                    lock(heldKeys){if(heldKeys.Contains((ushort)key))continue;}
+                    throw new InvalidOperationException("local-input-active");
+                }
+            }
+        }
         IntPtr previous=SetThreadDpiAwarenessContext(new IntPtr(-4));if(previous==IntPtr.Zero)throw new InvalidOperationException("dpi-unavailable");
         try
         {
@@ -220,23 +260,93 @@ internal sealed class WindowsScreenSurface:IScreenSurface
             string threadDesktop=DesktopName(GetThreadDesktop(GetCurrentThreadId())),inputDesktop=InputDesktopName();
             if(threadDesktop!="Default"||inputDesktop!="Default")throw new InvalidOperationException("desktop-unavailable");
             bool beforeKnown=GetCursorPos(out NativePoint before);string foregroundBefore=ForegroundProcess();uint foregroundDpiBefore=GetDpiForWindow(GetForegroundWindow());
-            var events=new List<Input>{Event(x,y,0xC001)};
-            if(action=="scroll")events.Add(Event(0,0,0x0800,unchecked((uint)(scrollSteps*120))));
+            var events=new List<Input>();
+            if(isButtonUp)
+            {
+                int b=action=="right-up"||(action=="up"&&scrollSteps==2)?2:action=="middle-up"||(action=="up"&&scrollSteps==4)?4:1;
+                if((heldMouseButtons & b) == 0)
+                {
+                    // This button was not held by this remote session; do not send unowned release event to Windows.
+                    return;
+                }
+                uint upFlag=b==2?16u:b==4?0x0040u:4u;
+                events.Add(Event(0,0,upFlag));
+            }
             else
             {
-                uint down=action=="right-click"?8u:2u,up=action=="right-click"?16u:4u;
-                events.Add(Event(0,0,down));events.Add(Event(0,0,up));
-                if(action=="double-click"){events.Add(Event(0,0,down));events.Add(Event(0,0,up));}
+                events.Add(Event(x,y,0xC001));
+                if(action=="scroll")events.Add(Event(0,0,0x0800,unchecked((uint)(scrollSteps*120))));
+                else if(action=="move"){}
+                else if(isButtonDown)
+                {
+                    uint downFlag=action=="right-down"||(action=="down"&&scrollSteps==2)?8u:action=="middle-down"||(action=="down"&&scrollSteps==4)?0x0020u:2u;
+                    events.Add(Event(0,0,downFlag));
+                }
+                else
+                {
+                    uint down=action=="right-click"?8u:2u,up=action=="right-click"?16u:4u;
+                    events.Add(Event(0,0,down));events.Add(Event(0,0,up));
+                    if(action=="double-click"){events.Add(Event(0,0,down));events.Add(Event(0,0,up));}
+                }
             }
-            RequireDesktop();if(IsProtectedPoint(point))throw new InvalidOperationException("protected-window");
-            // Any partial/failed submission has unknown outcome. Never replay it.
+            RequireDesktop();if(IsProtectedPoint(point)&&!isButtonUp)throw new InvalidOperationException("protected-window");
             authorize();int error;uint sent=Submit(events.ToArray(),out error);
+            for(int i=0;i<sent;i++)
+            {
+                uint flags=events[i].Data.Mouse.Flags;
+                if((flags&2)!=0)heldMouseButtons|=1;
+                if((flags&4)!=0)heldMouseButtons&=~1;
+                if((flags&8)!=0)heldMouseButtons|=2;
+                if((flags&16)!=0)heldMouseButtons&=~2;
+                if((flags&0x0020)!=0)heldMouseButtons|=4;
+                if((flags&0x0040)!=0)heldMouseButtons&=~4;
+            }
             NativePoint after=default;bool afterKnown=false,atTarget=false;var watch=Stopwatch.StartNew();
-            // Observe bounded cursor motion only; never resend or force foreground.
             do{afterKnown=GetCursorPos(out after);atTarget=afterKnown&&CursorAtTarget(after.X,after.Y,point);if(atTarget||sent!=(uint)events.Count)break;Thread.Sleep(5);}while(watch.ElapsedMilliseconds<100);
             WriteMouseDiagnostic(new{utc=DateTime.UtcNow.ToString("o"),session=Process.GetCurrentProcess().SessionId,threadDesktop,inputDesktop,virtualX=left,virtualY=top,virtualWidth=width,virtualHeight=height,monitorKnown,monitor=monitorKnown?monitor.Device:"unavailable",monitorX=monitor.Monitor.Left,monitorY=monitor.Monitor.Top,monitorWidth=monitor.Monitor.Right-monitor.Monitor.Left,monitorHeight=monitor.Monitor.Bottom-monitor.Monitor.Top,targetX=point.X,targetY=point.Y,absoluteX=x,absoluteY=y,beforeKnown,beforeX=before.X,beforeY=before.Y,afterKnown,afterX=after.X,afterY=after.Y,foregroundBefore,foregroundAfter=ForegroundProcess(),foregroundDpiBefore,foregroundDpiAfter=GetDpiForWindow(GetForegroundWindow()),submitted=sent,requested=events.Count,win32=error,cursorAtTarget=atTarget});
-            CheckMouseOutcome(sent,(uint)events.Count,atTarget);
+            if(isButtonUp)
+            {
+                if(sent!=(uint)events.Count)throw new ScreenInputFailure("outcome-unknown",null);
+            }
+            else
+            {
+                CheckMouseOutcome(sent,(uint)events.Count,atTarget);
+            }
         }
         finally{SetThreadDpiAwarenessContext(previous);}
+    }
+    public bool ReleaseHeldInputs()
+    {
+        if(heldMouseButtons!=0)
+        {
+            var events=new List<Input>();
+            int releasing=heldMouseButtons;
+            if((releasing&1)!=0)events.Add(Event(0,0,4));
+            if((releasing&2)!=0)events.Add(Event(0,0,16));
+            if((releasing&4)!=0)events.Add(Event(0,0,0x0040));
+            if(events.Count>0)
+            {
+                int err;uint sent=Submit(events.ToArray(),out err);
+                for(int i=0;i<sent;i++)
+                {
+                    uint flags=events[i].Data.Mouse.Flags;
+                    if((flags&4)!=0)heldMouseButtons&=~1;
+                    if((flags&16)!=0)heldMouseButtons&=~2;
+                    if((flags&0x0040)!=0)heldMouseButtons&=~4;
+                }
+            }
+        }
+        lock(heldKeys)
+        {
+            if(heldKeys.Count>0)
+            {
+                var events=new List<Input>();
+                var codes=new List<ushort>(heldKeys);
+                foreach(ushort code in codes)events.Add(KeyEvent(code,0,2));
+                int err;uint sent=Submit(events.ToArray(),out err);
+                for(int i=0;i<sent;i++)heldKeys.Remove(codes[i]);
+            }
+        }
+        return heldMouseButtons==0&&heldKeys.Count==0;
     }
 }

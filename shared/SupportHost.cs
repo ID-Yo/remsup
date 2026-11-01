@@ -36,6 +36,7 @@ internal sealed class SupportHost : IDisposable
     public event Action<SupportSnapshot> Changed;
     internal event Action RelayRegistrationsReady;
     public Action<Stream,CancellationToken> ScreenHandler;
+    public Action<Stream,CancellationToken> FileHandler;
     public SupportSnapshot Snapshot
     {
         get
@@ -232,13 +233,13 @@ internal sealed class SupportHost : IDisposable
                         {
                             try
                             {
-                                if(socket.Poll(0,SelectMode.SelectRead)&&socket.Available==0)
+                                if(IsSocketClosed(socket))
                                 {
                                     bool owns;lock(sync)
                                     {
                                         owns=gen==generation&&activeSocket==c;if(owns)relaySession=false;
                                     }
-                                    if(owns)Publish(gen,SupportState.Reconnecting,"Relay lost; command may still be running");c.Close();
+                                    if(owns)Publish(gen,SupportState.Reconnecting,"Relay lost; command may still be running"); c.Close();
                                 }
                             }
                             catch(ObjectDisposedException){}
@@ -263,6 +264,29 @@ internal sealed class SupportHost : IDisposable
             }
             else if(screen&&!token.IsCancellationRequested){try{token.WaitHandle.WaitOne(1000);}catch(ObjectDisposedException){break;}}
         }
+    }
+
+    internal static bool IsSocketClosed(Socket socket)
+    {
+        try
+        {
+            if(!socket.Poll(0,SelectMode.SelectRead)||socket.Available>0)return false;
+            bool prev=socket.Blocking;
+            try
+            {
+                socket.Blocking=false;
+                byte[] peek=new byte[1];
+                int n=socket.Receive(peek,0,1,SocketFlags.Peek);
+                return n==0;
+            }
+            catch(SocketException ex)
+            {
+                if(ex.SocketErrorCode==SocketError.WouldBlock||ex.SocketErrorCode==SocketError.IOPending)return false;
+                return true;
+            }
+            finally{try{socket.Blocking=prev;}catch{}}
+        }
+        catch{return true;}
     }
     static string BusyResponse(){return "ERR busy";}
     void MarkRelayRegistered(int gen,int epoch,bool screen,bool fixtureRelay)
@@ -328,6 +352,13 @@ internal sealed class SupportHost : IDisposable
                 if(header!="REMSUPSCREEN1")RemsupProtocol.WriteLine(stream,"REMSUPSCREEN1 ERROR wrong-channel");
                 else if(handler==null)RemsupProtocol.WriteLine(stream,"REMSUPSCREEN1 ERROR screen-disabled");
                 else handler(stream,token);
+            }
+            else if(header=="REMSUPFILE1")
+            {
+                c.NoDelay=true;
+                var handler=FileHandler;
+                if(handler==null)RemsupProtocol.WriteLine(stream,"REMSUP1 ERROR wrong-channel");
+                else {Publish(gen,relayState,"Active file transfer");handler(stream,token);}
             }
             else if(header=="REMSUPDIAG1")
             {

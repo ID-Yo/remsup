@@ -28,9 +28,102 @@ internal static class WebViewLayoutTests {
   Check(Math.Abs(m.GetProperty("width").GetDouble()*scale-client.Right)<=2&&Math.Abs(m.GetProperty("height").GetDouble()*scale-client.Bottom)<=2,step+" real DOM viewport fills native client; DPI="+GetDpiForWindow(hwnd)+" dpr="+scale);
   Check(m.GetProperty("footer").GetBoolean(),step+" status footer fully inside viewport");
  }
+ static async Task TestAppLocalRuntimeSelection(string rootDir,string runtimePackagePath){
+  string testDir=Path.Combine(rootDir,"applocal-test");
+  Directory.CreateDirectory(testDir);
+  string emptyCacheDir=Path.Combine(testDir,"empty-extraction-cache");
+  Directory.CreateDirectory(emptyCacheDir);
+
+  // 1. Incomplete / corrupted bundled runtime fails closed (P1)
+  string corruptAppDir=Path.Combine(testDir,"corrupt-app");
+  string corruptWv=Path.Combine(corruptAppDir,"runtimes","webview2");
+  Directory.CreateDirectory(corruptWv);
+  File.WriteAllText(Path.Combine(corruptWv,"remsup-runtime.json"),"{}");
+  bool corruptFailedClosed=false;
+  try{ModernProgram.ResolveRuntimeFolder(null,Path.Combine(corruptAppDir,"Remsup.exe"),emptyCacheDir);}
+  catch(InvalidOperationException ex){corruptFailedClosed=ex.Message.Contains("Silent system fallback is disabled for bundled runtime builds");}
+  Check(corruptFailedClosed,"Bundled build with incomplete runtime fails closed and rejects silent system fallback");
+
+  // 2. P1 Negative: Incomplete adjacent bundle with a VALID extraction cache MUST fail closed, not fall through to cache
+  string corruptAppValidCacheDir=Path.Combine(testDir,"corrupt-app-valid-cache");
+  Directory.CreateDirectory(corruptAppValidCacheDir);
+  string corruptAdjacentWv=Path.Combine(corruptAppValidCacheDir,"runtimes","webview2");
+  Directory.CreateDirectory(corruptAdjacentWv);
+  File.WriteAllText(Path.Combine(corruptAdjacentWv,"remsup-runtime.json"),"{}");
+
+  string validCacheDir=Path.Combine(testDir,"valid-cache-with-runtime");
+  string validCacheWv=Path.Combine(validCacheDir,"runtimes","webview2");
+  Directory.CreateDirectory(validCacheWv);
+  File.WriteAllText(Path.Combine(validCacheWv,"msedgewebview2.exe"),"valid-cache-stub");
+
+  bool corruptAdjacentValidCacheFailed=false;
+  try{ModernProgram.ResolveRuntimeFolder(null,Path.Combine(corruptAppValidCacheDir,"Remsup.exe"),validCacheDir);}
+  catch(InvalidOperationException ex){corruptAdjacentValidCacheFailed=ex.Message.Contains("Silent system fallback is disabled for bundled runtime builds");}
+  Check(corruptAdjacentValidCacheFailed,"Corrupt adjacent bundle with valid extraction cache fails closed and does not fall through to cache");
+
+  // 3. Unbundled build returns null, allowing system runtime fallback
+  string unbundledAppDir=Path.Combine(testDir,"unbundled-app");
+  Directory.CreateDirectory(unbundledAppDir);
+  string unbundledRuntime=ModernProgram.ResolveRuntimeFolder(null,Path.Combine(unbundledAppDir,"Remsup.exe"),emptyCacheDir);
+  Check(unbundledRuntime==null,"Unbundled build without adjacent runtimes returns null for system fallback");
+
+  // 4. Invalid override folder fails closed
+  string invalidOverride=Path.Combine(testDir,"nonexistent-override");
+  bool invalidOverrideFailed=false;
+  try{ModernProgram.ResolveRuntimeFolder(invalidOverride,Path.Combine(unbundledAppDir,"Remsup.exe"),emptyCacheDir);}
+  catch(InvalidOperationException){invalidOverrideFailed=true;}
+  Check(invalidOverrideFailed,"Invalid override folder fails closed");
+
+  // 5. Valid app-local runtime resolution with empty extraction cache
+  string appDir=Path.Combine(testDir,"valid-app");
+  string exePath=Path.Combine(appDir,"Remsup.exe");
+  string appLocalWv=Path.Combine(appDir,"runtimes","webview2");
+  Directory.CreateDirectory(appLocalWv);
+  File.WriteAllText(Path.Combine(appLocalWv,"msedgewebview2.exe"),"fake-stub");
+  string resolved=ModernProgram.ResolveRuntimeFolder(null,exePath,emptyCacheDir);
+  Check(resolved==appLocalWv,"ResolveRuntimeFolder selects app-local runtime from real exe directory when extraction cache is empty");
+  Check(!Directory.Exists(Path.Combine(emptyCacheDir,"runtimes")),"Extraction cache remained strictly empty during resolution");
+
+  // Fallback to base directory when exe directory has no runtime
+  string baseDirWithWv=Path.Combine(testDir,"base-dir-with-runtime");
+  string baseWv=Path.Combine(baseDirWithWv,"runtimes","webview2");
+  Directory.CreateDirectory(baseWv);
+  File.WriteAllText(Path.Combine(baseWv,"msedgewebview2.exe"),"fake-stub");
+  string fallback=ModernProgram.ResolveRuntimeFolder(null,Path.Combine(unbundledAppDir,"Remsup.exe"),baseDirWithWv);
+  Check(fallback==baseWv,"ResolveRuntimeFolder falls back to base directory when exe has no adjacent runtime");
+
+  // 6. Mandatory live CoreWebView2Environment selection check using candidate runtime package (P2)
+  string packagePath=runtimePackagePath;
+  if(string.IsNullOrEmpty(packagePath)){
+   packagePath=Environment.GetEnvironmentVariable("REMSUP_WEBVIEW2_RUNTIME_PATH");
+  }
+  if(string.IsNullOrEmpty(packagePath)){
+   string defaultCandidatePkg=Path.Combine(@"E:\","Codex_work","remsup-standalone-package-20261018","runtimes","webview2");
+   if(Directory.Exists(defaultCandidatePkg)&&File.Exists(Path.Combine(defaultCandidatePkg,"msedgewebview2.exe"))){
+    packagePath=defaultCandidatePkg;
+   }
+  }
+  if(!string.IsNullOrEmpty(packagePath)&&Directory.Exists(packagePath)&&File.Exists(Path.Combine(packagePath,"msedgewebview2.exe"))){
+   string liveAppDir=Path.Combine(testDir,"live-candidate-app");
+   Directory.CreateDirectory(liveAppDir);
+   string packageRoot=Path.GetDirectoryName(Path.GetDirectoryName(packagePath));
+   string candidateExe=Path.Combine(packageRoot,"RemsupDesktop_v1.25.exe");
+   string liveResolved=ModernProgram.ResolveRuntimeFolder(null,candidateExe,emptyCacheDir);
+   Check(liveResolved==packagePath,"ResolveRuntimeFolder selects candidate package runtime adjacent to executable with empty extraction cache");
+
+   string userData=Path.Combine(testDir,"live-wv-userdata");
+   var env=await Microsoft.Web.WebView2.Core.CoreWebView2Environment.CreateAsync(liveResolved,userData);
+   Check(env.BrowserVersionString.StartsWith("155.0.4283.60"),"CoreWebView2Environment initialized with app-local fixed version runtime (155.0.4283.60), not system");
+   Console.WriteLine("PASS Candidate app-local WebView2 runtime selection and live initialization verified (155.0.4283.60)");
+  } else {
+   throw new InvalidOperationException("Mandatory candidate WebView2 runtime package not found. Provide candidate path via argument or REMSUP_WEBVIEW2_RUNTIME_PATH.");
+  }
+ }
  [STAThread]static int Main(string[] args){RuntimeSetup.Initialize();Directory.CreateDirectory(args[0]);var app=new Application{ShutdownMode=ShutdownMode.OnExplicitShutdown};app.Startup+=async(_,__)=>{
   ModernWindow window=null;Process legacy=null;
   try{
+   string runtimePkg = args.Length > 2 ? args[2] : null;
+   await TestAppLocalRuntimeSelection(args[0], runtimePkg);
    string fixture=Path.Combine(args[0],"fixture");
    if(args.Length>1){string evidence=Path.Combine(args[0],"legacy");var start=new ProcessStartInfo(args[1]){UseShellExecute=false};start.ArgumentList.Add("--fixture-root");start.ArgumentList.Add(fixture);start.ArgumentList.Add("--artifacts");start.ArgumentList.Add(evidence);legacy=Process.Start(start);var limit=DateTime.UtcNow.AddSeconds(30);while(!File.Exists(Path.Combine(evidence,"ready.json"))&&DateTime.UtcNow<limit&&!legacy.HasExited)await Task.Delay(100);Check(File.Exists(Path.Combine(evidence,"ready.json")),"legacy SystemAware renderer running during candidate startup");}
    window=new ModernWindow(new HostOptions(new[]{"--fixture-root",fixture}));app.MainWindow=window;window.Show();

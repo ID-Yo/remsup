@@ -25,6 +25,7 @@ Use the owner-authorized profile/Device ID, and use the default setup environmen
 $client='<skill>\scripts\remsup-mcp.ps1'
 & $client -Operation health -Agent codex
 & $client -Operation exec -Name APPROVED_PROFILE -DeviceId APPROVED_ID -Command 'echo authorized-probe'
+& $client -Operation exec -Name APPROVED_PROFILE -DeviceId APPROVED_ID -Command 'echo authorized-probe' -ExecutionTimeoutSeconds 90
 & $client -Operation screen -Name APPROVED_PROFILE -DeviceId APPROVED_ID -CapabilitiesOnly
 & $client -Operation screen -Name APPROVED_PROFILE -DeviceId APPROVED_ID -MonitorId EXACT_CAPABILITIES_ID -ImageDirectory '<absolute-private-evidence-directory>'
 ```
@@ -87,3 +88,5 @@ Close succeeds with result:already-closed for a recently terminated session owne
 `input-not-applied` with `dispatched:true` and `channel_terminated:false` means all native input packets were submitted, but the pointer was not observed at the target. It does not prove the click had no effect. Deskflow, Synergy, Barrier and Input Leap can hold or redirect the pointer. Keep the session, take a new capture and inspect before any further input; the consumer clears its usable frame reference after either input error. Never stop competing software without owner authorization.
 
 Cloaked foreground/focus/target windows are refused as `protected-window` before dispatch. Capture/session failures expose an allowlisted server code instead of a generic refusal. The server audits known failure codes and session-drop reasons without device credentials, coordinates or typed text. A monitor left of the primary display uses negative physical X coordinates; they are valid. The observed missing-session capture was not evidence of a coordinate or PNG failure.
+
+Explicit -ExecutionTimeoutSeconds (exec only, integer 1..300) selects the receiver process deadline. Omission preserves the server command_timeout_seconds default. -TimeoutSeconds remains the bounded client wait for setup/health; exec response waiting is extended to cover the effective execution deadline plus bounded cleanup/transport allowance (45 seconds). The server and receiver reject execution timeouts outside 1..300. No timeout or disconnect is replayed automatically. An older MCP server must be upgraded before using the new parameter; larger client waiting alone does not extend remote execution.

@@ -21,7 +21,18 @@ internal static class ScreenChannelTests
         public bool IsProtectedPoint(ScreenPoint point)=>false;
         public string Typed="",Key="";
         public void Keyboard(string text,string key,ScreenGeometry geometry,Action authorize){authorize();Typed+=text;Key=key;}
-        public void Mouse(string action,ScreenPoint point,int steps,Action authorize){authorize();Inputs++;if(Failure!=null)throw Failure;Changed=true;}
+        public int HeldButtons;
+        public void Mouse(string action,ScreenPoint point,int steps,Action authorize){
+            authorize();Inputs++;if(Failure!=null)throw Failure;
+            if(action=="left-down"||action=="down")HeldButtons|=1;
+            else if(action=="right-down")HeldButtons|=2;
+            else if(action=="middle-down")HeldButtons|=4;
+            else if(action=="left-up"||action=="up"){if((HeldButtons&1)==0)return;HeldButtons&=~1;}
+            else if(action=="right-up"){if((HeldButtons&2)==0)return;HeldButtons&=~2;}
+            else if(action=="middle-up"){if((HeldButtons&4)==0)return;HeldButtons&=~4;}
+            Changed=true;
+        }
+        public int Releases; public bool PendingRelease; public bool HasPendingRelease=>PendingRelease; public bool FailRelease; public bool ReleaseHeldInputs(){ Releases++; if(!FailRelease){HeldButtons=0;PendingRelease=false;} return !FailRelease; }
     }
     sealed class Duplex:Stream
     {
@@ -49,6 +60,7 @@ internal static class ScreenChannelTests
             // Closed permission window revokes the lease; request again.
             request=Response(Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="request",monitor_id="synthetic",control=true,operator_label="synthetic operator"}));lease=Guid.Parse(request.GetProperty("session_id").GetString());
             try{Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="capture",session_id=lease});throw new Exception("unapproved capture allowed");}catch(InvalidOperationException){}
+            try{Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="cadence",session_id=lease,interval_ms=100});throw new Exception("cadence on pending session allowed");}catch(InvalidOperationException){}
             Check(surface.Captures==0,"unapproved provider not called");access.GrantLocal(lease,true);
             bool settingsEnabled=false;int writes=0;channel.SettingsHandler=(op,data,authorize)=>{authorize();if(!settingsEnabled)throw new InvalidOperationException("settings-disabled");if(op=="settings.set"){if(data.GetProperty("name").GetString()!="autoUpdates")throw new InvalidOperationException("settings-forbidden");writes++;}return new{autoUpdates=false};};
             Check(Response(Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="settings.read",session_id=lease})).GetProperty("settings_error").GetString()=="settings-disabled"&&writes==0,"wire settings OFF denial");
@@ -57,20 +69,72 @@ internal static class ScreenChannelTests
             settingsEnabled=false;Check(Response(Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="settings.read",session_id=lease})).GetProperty("settings_error").GetString()=="settings-disabled","wire immediate revoke");
             byte[] capture=Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="capture",session_id=lease});var metadata=Response(capture);Guid frame=Guid.Parse(metadata.GetProperty("frame_id").GetString());
             Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="mouse",session_id=lease,frame_id=frame,geometry_version=1,action="click",x=1,y=1,scroll_steps=0});Check(surface.Inputs==1,"synthetic wire mouse sink");
-            now=200;Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="text",session_id=lease,frame_id=frame,geometry_version=1,text="Тест 😀"});Check(surface.Typed=="Тест 😀","wire Unicode text sink");
-            now=400;Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="key",session_id=lease,frame_id=frame,geometry_version=1,key="ctrl+shift+s"});Check(surface.Key=="ctrl+shift+s","wire Save As key sink");
+            now=20;Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="mouse",session_id=lease,frame_id=frame,geometry_version=1,action="move",x=2,y=2,scroll_steps=0});Check(surface.Inputs==2,"wire move sink");
+            now=70;Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="mouse",session_id=lease,frame_id=frame,geometry_version=1,action="down",x=2,y=2,scroll_steps=0});Check(surface.Inputs==3,"wire down sink");
+            now=120;Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="mouse",session_id=lease,frame_id=frame,geometry_version=1,action="up",x=2,y=2,scroll_steps=0});Check(surface.Inputs==4,"wire up sink");
+            now=350;Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="text",session_id=lease,frame_id=frame,geometry_version=1,text="Тест 😀"});Check(surface.Typed=="Тест 😀","wire Unicode text sink");
+            now=550;Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="key",session_id=lease,frame_id=frame,geometry_version=1,key="ctrl+shift+s"});Check(surface.Key=="ctrl+shift+s","wire Save As key sink");
             var refusal=Response(Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="key",session_id=lease,frame_id=frame,geometry_version=1,key="win+r"}));Check(!refusal.GetProperty("dispatched").GetBoolean()&&surface.Key=="ctrl+shift+s","unsupported key confirmed refused");
             var captureRefusal=Response(Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="capture",session_id=lease}));
             Check(captureRefusal.GetProperty("error").GetString()=="capture-rate-limit"&&!captureRefusal.GetProperty("dispatched").GetBoolean()&&surface.Captures==1&&access.Snapshot.CanView,"early capture confirmed refused without provider or revocation");
             var status=Response(Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="status",session_id=lease}));Check(status.GetProperty("can_control").GetBoolean(),"channel still granted after capture refusal");
-            now=600;surface.Failure=new Exception("PRIVATE_SENTINEL");
+            now=750;surface.Failure=new Exception("PRIVATE_SENTINEL");
             var unknown=Response(Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="mouse",session_id=lease,frame_id=frame,geometry_version=1,action="click",x=1,y=1,scroll_steps=0}));
-            Check(unknown.GetProperty("error").GetString()=="outcome-unknown"&&unknown.GetProperty("dispatched").ValueKind==JsonValueKind.Null&&!unknown.GetProperty("channel_terminated").GetBoolean()&&access.Snapshot.CanView,"unexpected input exception structured without false refusal or channel loss");surface.Failure=new ScreenInputFailure("input-not-applied",true);now=800;
+            Check(unknown.GetProperty("error").GetString()=="outcome-unknown"&&unknown.GetProperty("dispatched").ValueKind==JsonValueKind.Null&&!unknown.GetProperty("channel_terminated").GetBoolean()&&access.Snapshot.CanView,"unexpected input exception structured without false refusal or channel loss");surface.Failure=new ScreenInputFailure("input-not-applied",true);now=950;
             var held=Response(Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="mouse",session_id=lease,frame_id=frame,geometry_version=1,action="click",x=1,y=1,scroll_steps=0}));
             Check(held.GetProperty("error").GetString()=="input-not-applied"&&held.GetProperty("dispatched").GetBoolean()&&!held.GetProperty("channel_terminated").GetBoolean(),"held cursor failure preserves dispatch and channel");surface.Failure=null;
-            now=1000;capture=Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="capture",session_id=lease});Check(surface.Captures==2&&surface.Changed,"wire capture -> click -> capture");
+            now=1150;capture=Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="capture",session_id=lease});Check(surface.Captures==2&&surface.Changed,"wire capture -> click -> capture");
+            try{Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="cadence",session_id=lease,interval_ms=30});throw new Exception("cadence < 50 allowed");}catch(InvalidDataException){}
+            try{Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="cadence",session_id=lease,interval_ms=1500});throw new Exception("cadence > 1000 allowed");}catch(InvalidDataException){}
+            var cad=Response(Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="cadence",session_id=lease,interval_ms=100}));
+            Check(cad.GetProperty("ok").GetBoolean()&&cad.GetProperty("interval_ms").GetInt32()==100,"wire cadence config failed");
+            now=1250;var fastCap=Response(Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="capture",session_id=lease}));
+            Check(fastCap.GetProperty("frame_id").GetString()!=null,"wire fast capture at 100ms interval failed");
+            now=1270;Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="mouse",session_id=lease,frame_id=frame,geometry_version=1,action="left-down",x=1,y=1,scroll_steps=0});
+            now=1275;Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="mouse",session_id=lease,frame_id=frame,geometry_version=1,action="left-up",x=1,y=1,scroll_steps=0});
             if(args.Length==1)File.WriteAllBytes(args[0],capture); // synthetic cross-language fixture only
             Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="close",session_id=lease});Check(!access.Snapshot.CanView,"wire close revokes");
+            Check(surface.Releases>0,"central release invoked on session termination");
+            // Negative test: HasPendingRelease blocks new session request and grant
+            surface.PendingRelease=true;
+            surface.FailRelease=true;
+            try{access.Request("block-conn","synthetic",true);throw new Exception("request accepted with pending release");}catch(InvalidOperationException ex){Check(ex.Message=="pending-input-release","pending release did not block new request");}
+            surface.FailRelease=false;
+            surface.ReleaseHeldInputs();
+
+            // Stale-frame Up release test: down on frame, then newer capture advances latest frame, then Up with old frame succeeds
+            lease=access.Request("synthetic-connection","synthetic",true);
+            access.GrantLocal(lease,true);
+            now+=1000;var staleCapture=access.Capture("synthetic-connection",lease);Guid oldFrameId=staleCapture.Frame.FrameId;
+            var downResp=Response(Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="mouse",session_id=lease,frame_id=oldFrameId,geometry_version=1,action="left-down",x=1,y=1,scroll_steps=0}));
+            Check(downResp.GetProperty("state").GetString()=="Granted","down on fresh frame failed");
+            now+=1000;var newerCapture=access.Capture("synthetic-connection",lease);
+            now+=10;var upResp=Response(Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="mouse",session_id=lease,frame_id=oldFrameId,geometry_version=1,action="left-up",x=1,y=1,scroll_steps=0}));
+            Check(upResp.GetProperty("state").GetString()=="Granted"&&(!upResp.TryGetProperty("error",out var upErr)||string.IsNullOrEmpty(upErr.GetString())),"up on old frame was rejected");
+            Check(surface.HeldButtons==0,"held button not cleared after valid left-up");
+
+            // Test unowned Up: right-up without right-down does not release unowned button
+            Guid freshFrameId = newerCapture.Frame.FrameId;
+            now+=60;
+            Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="mouse",session_id=lease,frame_id=freshFrameId,geometry_version=1,action="left-down",x=1,y=1,scroll_steps=0});
+            Check(surface.HeldButtons==1,"left-down did not set held button");
+            Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="mouse",session_id=lease,frame_id=freshFrameId,geometry_version=1,action="right-up",x=1,y=1,scroll_steps=0});
+            Check(surface.HeldButtons==1,"unowned right-up cleared left button");
+            Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="mouse",session_id=lease,frame_id=freshFrameId,geometry_version=1,action="left-up",x=1,y=1,scroll_steps=0});
+            Check(surface.HeldButtons==0,"left-up did not clear owned button");
+
+            // Local mouse revocation invokes ReleaseHeldInputs
+            surface.Releases=0;
+            access.SetLocalInput(false,true);
+            Check(surface.Releases==1,"local mouse revocation invoked ReleaseHeldInputs");
+            access.SetLocalInput(true,true);
+            access.Stop();
+
+            // Automatic failed release retry on RefreshEnvironment when session is revoked/off
+            surface.Releases=0;
+            surface.PendingRelease=true;
+            access.RefreshEnvironment();
+            Check(surface.Releases==1&&!surface.HasPendingRelease,"RefreshEnvironment did not service pending release on inactive session");
             try{Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="request",monitor_id="synthetic",control=false,approve=true});throw new Exception("remote approval field accepted");}catch(InvalidDataException){}
             access.SetPolicy(false,true);try{access.Request("policy","synthetic",true);throw new Exception("disabled view accepted");}catch(InvalidOperationException ex){Check(ex.Message=="screen-disabled","disabled view refuses new requests");}
             access.SetPolicy(true,false);lease=access.Request("policy","synthetic",true);Check(!access.Snapshot.RequestedControl,"global control disabled removes control request");access.GrantLocal(lease,false);Check(access.Snapshot.CanView&&!access.Snapshot.CanControl,"view survives control disabled");access.Stop();

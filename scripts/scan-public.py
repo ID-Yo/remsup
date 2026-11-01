@@ -19,9 +19,12 @@ REVIEW={
 def inspect(name,data):
  findings=[]
  path=pathlib.PurePosixPath(name)
- if set(path.parts)&BLOCKED or path.suffix.lower() in BINARY or (path.suffix.lower()=='.md' and 'HANDOFF' in path.name.upper()): findings.append((name,0,'excluded-file'))
+ is_brand = len(path.parts)==2 and path.parts[0]=='assets' and (path.name.startswith('remsup-') or path.name=='remsup.ico')
+ if set(path.parts)&BLOCKED or (path.suffix.lower() in BINARY and not is_brand) or (path.suffix.lower()=='.md' and 'HANDOFF' in path.name.upper()): findings.append((name,0,'excluded-file'))
  try: lines=data.decode('utf-8-sig').splitlines()
- except UnicodeError: return findings+[(name,0,'non-text')]
+ except UnicodeError:
+  if is_brand: return []
+  return findings+[(name,0,'non-text')]
  for number,line in enumerate(lines,1):
   for category,pattern in PATTERNS.items():
    if pattern.search(line): findings.append((name,number,category))
