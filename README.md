@@ -2,9 +2,9 @@
 
 Visible Windows remote support for explicitly authorized maintenance. The receiver can stop support and exit from the tray. Commands have time and output bounds. Screen viewing/control follows the receiving user's settings and consent policy. No hidden service, automatic elevation or endpoint security bypass is provided.
 
-The v1.53 experimental Windows app uses the public Remsup TLS relay by default. Anyone may use this relay for support explicitly authorized by the device owner. No account, MCP token or device credential is included. Relay administrators can see relayed credentials and command data; this is not a claim of production security or end-to-end encryption.
+The Windows app uses the public Remsup TLS relay by default. Anyone may use this relay for support explicitly authorized by the device owner. No account, MCP token or device credential is included. Relay administrators can see relayed credentials and command data; this is not a claim of production security or end-to-end encryption.
 
-Download the reviewed ready app from [GitHub Releases](https://github.com/ID-Yo/remsup/releases), verify its SHA256SUMS, and run the EXE on Windows x64 with the Evergreen WebView2 Runtime installed. SDK, Node and Python are needed only for source builds or separate MCP tooling. See [public relay setup](docs/public-relay.md). v1.51 remains the prior experimental distribution.
+New here? Read [Getting started](docs/getting-started.md) for people and for AI agents. Download the latest stable app from [GitHub Releases](https://github.com/ID-Yo/remsup/releases) (file names say `stable` or `beta`), verify its SHA256SUMS, and run the EXE on Windows x64 with the Evergreen WebView2 Runtime installed. SDK, Node and Python are needed only for source builds or separate MCP tooling. See [public relay setup](docs/public-relay.md).
 
 ## Build and test
 
@@ -23,14 +23,14 @@ The repository provides original product brand icons in `assets/` (PNG frames an
 
 ## Configuration
 
-The default relay is `91.227.77.177:443`, pinned to SPKI SHA256 `b826918726ce38a6825ad8ea9df38180dad007a9d724673d6df6a5d3efe8d0f4`. These are public routing/trust metadata, not credentials. No manual relay setup is needed on a fresh v1.53 app. Existing saved custom endpoints and pins remain unchanged. Settings > Network can select your own verified TLS relay. Administrators may provision `REMSUP_RELAY_HOST` and `REMSUP_RELAY_PIN` together before startup; process-only environment overrides do not persist after login.
+The default relay is `91.227.77.177:443`, pinned to SPKI SHA256 `b826918726ce38a6825ad8ea9df38180dad007a9d724673d6df6a5d3efe8d0f4`. These are public routing/trust metadata, not credentials. No manual relay setup is needed on a fresh app. Existing saved custom endpoints and pins remain unchanged. Settings > Network can select your own verified TLS relay. Administrators may provision `REMSUP_RELAY_HOST` and `REMSUP_RELAY_PIN` together before startup; process-only environment overrides do not persist after login.
 
 ## Automatic updates and channel disclosure
 
-In this experimental v1.53 release executable, automatic update checks are enabled by default (AutoUpdates=true in new settings) and query the pinned update service at https://91.227.77.177:8444/latest.json approximately 5 seconds after application startup and periodically thereafter.
+In the current release executable, automatic update checks are enabled by default (AutoUpdates=true in new settings) and query the pinned update service at https://91.227.77.177:8444/latest.json approximately 5 seconds after application startup and periodically thereafter.
 
 **Important channel note:**
-The official update channel currently serves version v1.52 (a lower version than this v1.53 release). Because UpdateManager enforces strict version comparison (CompareVersions <= 0), the application recognizes that it already has the current version and does not download or downgrade files.
+The official update channel currently serves an earlier version than the latest release. Because UpdateManager enforces strict version comparison (CompareVersions <= 0), the application does not download or downgrade files. Download new releases manually from GitHub Releases.
 
 **Disabling automatic update checks:**
 If you wish to prevent network checks to the update endpoint, navigate to **Settings > General** and uncheck **Automatically check for and install updates**, then click **Save changes**. Alternatively, configure an isolated network environment. No personal files, device passwords, or customer telemetry are transmitted during update checks.

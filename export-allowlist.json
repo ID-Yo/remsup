@@ -133,6 +133,7 @@
   "docs/architecture.md",
   "docs/architecture/remote-settings-permission.md",
   "docs/architecture/runtime-diagnostics.md",
+  "docs/getting-started.md",
   "docs/npm-license-inventory.json",
   "docs/public-relay.md",
   "docs/usage/03-agent-guide.md",
