@@ -239,7 +239,10 @@ class ScreenHttpTests(unittest.TestCase):
                     self.assertEqual(streams[-1].typed, "Тест 😀 test1_remote.txt")
                     streams[-1].refuse = False
                     self.assertTrue(call("key", {**reference, "key": "win+r"})["isError"])
-                    self.assertTrue(call("text", {**reference, "text": "x" * 129})["isError"])
+                    self.assertTrue(call("text", {**reference, "text": "x" * 1025})["isError"])
+                    long_text = call("text", {**reference, "text": "y" * 129})
+                    self.assertFalse(long_text.get("isError", False))
+                    self.assertTrue(streams[-1].typed.endswith("y" * 129))
                     self.assertTrue(call("status", {"session_id": session}, "other-token")["isError"])
                     self.assertFalse(streams[-1].closed)
                     self.assertFalse(call("close", {"session_id": session}).get("isError", False))

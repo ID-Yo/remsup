@@ -13,7 +13,7 @@ Windows x64, PowerShell 7 plus Windows PowerShell, .NET SDK from `global.json`, 
 ```powershell
 python -m venv .venv
 .venv/Scripts/python -m pip install -r mcp/requirements.txt
-./scripts/build-modern-desktop.ps1 -Publish -Version v1.53 -Output <new-absolute-output-folder>
+./scripts/build-modern-desktop.ps1 -Publish -Version v1.54 -Output <new-absolute-output-folder>
 ./scripts/ci-local.ps1 -Python <venv-python> -OutputRoot <new-absolute-ci-folder>
 ```
 

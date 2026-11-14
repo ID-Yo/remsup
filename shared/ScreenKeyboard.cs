@@ -3,7 +3,7 @@ using System;
 internal static class ScreenKeyboard
 {
     public static readonly string[] Keys = {
-        "ctrl+l", "ctrl+a", "ctrl+s", "ctrl+shift+s",
+        "ctrl+l", "ctrl+a", "ctrl+c", "ctrl+v", "ctrl+x", "ctrl+z", "ctrl+y", "ctrl+w", "ctrl+f", "ctrl+s", "ctrl+shift+s",
         "enter", "tab", "shift+tab", "escape", "backspace", "delete",
         "up", "down", "left", "right", "home", "end"
     };

@@ -127,6 +127,107 @@ class ScreenSessionsTests(unittest.TestCase):
         service.expire()
         self.assertTrue(channel.closed)
 
+    def _text_channel(self, outcome):
+        class TextChannel(SyntheticChannel):
+            def __init__(self):
+                super().__init__()
+                self.packets = []
+            def write(self, data):
+                request = read_metadata(io.BytesIO(data))
+                if request["operation"] == "request":
+                    return super().write(data)
+                result = {"version": 1, "request_id": request["request_id"], "session_id": self.session_id, "state": "Granted", "remaining_ms": 600000, "can_view": True, "can_control": True}
+                if request["operation"] == "text":
+                    self.packets.append(request["text"])
+                    verdict = outcome(len(self.packets))
+                    if verdict == "refuse":
+                        result = {"version": 1, "request_id": request["request_id"], "session_id": self.session_id, "error": "input-rate-limit", "dispatched": False}
+                    elif verdict == "drop":
+                        self.incoming = io.BytesIO()
+                        return
+                response = io.BytesIO()
+                write_metadata(response, result)
+                self.incoming = io.BytesIO(response.getvalue())
+        return TextChannel()
+
+    def test_long_text_is_sent_as_paced_scalar_safe_packets(self):
+        channel = self._text_channel(lambda n: "ok")
+        sleeps = []
+        service = ScreenSessions(lambda *_: channel, sleep=sleeps.append)
+        session = service.request("agent", "synthetic", "synthetic", "monitor", True)["session_id"]
+        text = "a" * 127 + "\U0001F600" + "b" * 300
+        result = service.text("agent", session, str(uuid.uuid4()), 1, text)
+        self.assertEqual("".join(channel.packets), text)
+        self.assertEqual(len(channel.packets), 4)
+        self.assertTrue(all(len(p.encode("utf-16-le")) // 2 <= 128 for p in channel.packets))
+        self.assertEqual(channel.packets[1][0], "\U0001F600")
+        self.assertEqual(sleeps, [0.25, 0.25, 0.25])
+        self.assertEqual((result["chunks_sent"], result["chunks_total"], result["units_sent"]), (4, 4, 429))
+
+    def test_short_text_is_one_unchanged_packet(self):
+        channel = self._text_channel(lambda n: "ok")
+        service = ScreenSessions(lambda *_: channel, sleep=lambda s: self.fail("no pacing for one packet"))
+        session = service.request("agent", "synthetic", "synthetic", "monitor", True)["session_id"]
+        result = service.text("agent", session, str(uuid.uuid4()), 1, "hello")
+        self.assertEqual(channel.packets, ["hello"])
+        self.assertNotIn("chunks_sent", result)
+
+    def test_text_stream_stops_at_first_refusal_without_replay(self):
+        from remsup_screen_sessions import PartialTextInput
+        channel = self._text_channel(lambda n: "refuse" if n == 3 else "ok")
+        service = ScreenSessions(lambda *_: channel, sleep=lambda s: None)
+        session = service.request("agent", "synthetic", "synthetic", "monitor", True)["session_id"]
+        with self.assertRaises(PartialTextInput) as caught:
+            service.text("agent", session, str(uuid.uuid4()), 1, "c" * 500)
+        self.assertEqual(len(channel.packets), 3)
+        self.assertIn('"chunks_sent":2', str(caught.exception))
+        self.assertIn('"units_sent":256', str(caught.exception))
+        self.assertIn("input-rate-limit", str(caught.exception))
+
+    def test_first_packet_refusal_is_a_plain_refusal(self):
+        from remsup_screen_sessions import ConfirmedInputRefusal
+        channel = self._text_channel(lambda n: "refuse")
+        service = ScreenSessions(lambda *_: channel, sleep=lambda s: None)
+        session = service.request("agent", "synthetic", "synthetic", "monitor", True)["session_id"]
+        with self.assertRaises(ConfirmedInputRefusal):
+            service.text("agent", session, str(uuid.uuid4()), 1, "d" * 500)
+        self.assertEqual(len(channel.packets), 1)
+
+    def test_text_stream_unknown_outcome_stops_and_drops_session(self):
+        channel = self._text_channel(lambda n: "drop" if n == 2 else "ok")
+        service = ScreenSessions(lambda *_: channel, sleep=lambda s: None)
+        session = service.request("agent", "synthetic", "synthetic", "monitor", True)["session_id"]
+        from remsup_screen_sessions import PartialTextInput, failure_code
+        with self.assertRaises(PartialTextInput) as caught:
+            service.text("agent", session, str(uuid.uuid4()), 1, "e" * 500)
+        self.assertEqual(len(channel.packets), 2)
+        self.assertTrue(channel.closed)
+        message = str(caught.exception)
+        for fragment in ('"error":"outcome-unknown"', '"partial":true', '"chunks_sent":1', '"chunks_total":4',
+                         '"units_sent":128', '"channel_terminated":true', 'Do not retry automatically'):
+            self.assertIn(fragment, message)
+        self.assertEqual(failure_code(caught.exception), "outcome-unknown")
+        with self.assertRaisesRegex(PermissionError, "screen-session-unavailable"):
+            service.operation("agent", session, "status")
+
+    def test_text_stream_input_validation_and_single_stream_per_session(self):
+        channel = self._text_channel(lambda n: "ok")
+        seen = []
+        def during_pause(_):
+            try:
+                service.text("agent", session, str(uuid.uuid4()), 1, "x" * 200)
+            except RuntimeError as exc:
+                seen.append(str(exc))
+        service = ScreenSessions(lambda *_: channel, sleep=during_pause)
+        session = service.request("agent", "synthetic", "synthetic", "monitor", True)["session_id"]
+        for bad in ("", "x" * 1025, "bad\x01" + "x" * 300, "\ud800" + "x" * 300, 5):
+            with self.assertRaises(ValueError):
+                service.text("agent", session, str(uuid.uuid4()), 1, bad)
+        self.assertEqual(channel.packets, [])
+        service.text("agent", session, str(uuid.uuid4()), 1, "y" * 1024)
+        self.assertEqual(len(channel.packets), 8)
+        self.assertEqual(seen, ["screen-text-stream-busy"] * 7)
+
     def test_keyboard_contract_matches_native(self):
         import re
         from remsup_screen_sessions import KEYS

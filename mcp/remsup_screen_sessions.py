@@ -24,6 +24,8 @@ def failure_code(exc):
     code=str(exc)
     if code.startswith('settings-outcome-unknown'):
         return 'outcome-unknown'
+    if getattr(exc, 'error', None) == 'outcome-unknown':
+        return 'outcome-unknown'
     return 'outcome-unknown' if code.startswith('screen-input-outcome-unknown') else code if code in SERVER_ERROR_CODES else 'refused-or-failed'
 
 
@@ -58,8 +60,42 @@ def project_settings(value):
     return projected
 
 
-KEYS = ('ctrl+l', 'ctrl+a', 'ctrl+s', 'ctrl+shift+s', 'enter', 'tab', 'shift+tab', 'escape', 'backspace', 'delete', 'up', 'down', 'left', 'right', 'home', 'end')
+KEYS = ('ctrl+l', 'ctrl+a', 'ctrl+c', 'ctrl+v', 'ctrl+x', 'ctrl+z', 'ctrl+y', 'ctrl+w', 'ctrl+f', 'ctrl+s', 'ctrl+shift+s', 'enter', 'tab', 'shift+tab', 'escape', 'backspace', 'delete', 'up', 'down', 'left', 'right', 'home', 'end')
 REFUSAL_CODES = frozenset(('permission-required','mouse-disabled','typing-disabled','control-required','session-mismatch','stale-frame','geometry-changed','geometry-version-mismatch','coordinates-out-of-range','invalid-action','invalid-scroll','input-rate-limit','protected-window','desktop-unavailable','dpi-unavailable','monitor-unavailable','local-input-active','foreground-required','foreground-monitor-mismatch','modifiers-held','keyboard-context-changed','invalid-keyboard-operation','key-not-allowed','text-size-limit','invalid-text','lease-expired'))
+
+
+MAX_TEXT_UNITS = 128      # one receiver text packet
+MAX_STREAM_UNITS = 1024   # streamed text per MCP call: at most eight packets, kept inside the 30 s frame window
+INPUT_SPACING = 0.25      # receiver rejects input requests closer than 200 ms
+
+
+def utf16_units(value):
+    return len(value.encode("utf-16-le")) // 2
+
+
+def split_text(value, limit=MAX_TEXT_UNITS):
+    """Split at Unicode scalar boundaries; no packet exceeds limit UTF-16 units."""
+    parts, current, units = [], [], 0
+    for ch in value:
+        width = utf16_units(ch)
+        if units + width > limit:
+            parts.append("".join(current))
+            current, units = [], 0
+        current.append(ch)
+        units += width
+    if current:
+        parts.append("".join(current))
+    return parts
+
+
+class PartialTextInput(RuntimeError):
+    """A text stream stopped after some packets were typed; never retried."""
+    def __init__(self, error, chunks_sent, chunks_total, units_sent, channel_terminated=None):
+        self.error = error
+        warning = 'Earlier packets were typed. Do not retry automatically; capture and inspect a new image.'
+        if error == 'outcome-unknown':
+            warning = 'Earlier packets were typed and the result of the next packet is unknown. Do not retry automatically; capture and inspect a new image.'
+        super().__init__('screen-text-stream-stopped: ' + json.dumps({'error': error, 'partial': True, 'chunks_sent': chunks_sent, 'chunks_total': chunks_total, 'units_sent': units_sent, 'channel_terminated': channel_terminated, 'warning': warning}, separators=(',', ':')))
 
 
 class ConfirmedInputRefusal(PermissionError, ValueError):
@@ -70,8 +106,10 @@ class ConfirmedInputRefusal(PermissionError, ValueError):
 
 
 class ScreenSessions:
-    def __init__(self, factory=None, clock=time.monotonic, on_drop=None):
+    def __init__(self, factory=None, clock=time.monotonic, on_drop=None, sleep=time.sleep):
         self._on_drop = on_drop
+        self._sleep = sleep
+        self._streaming = set()
         self._factory = factory
         self._clock = clock
         self._gate = threading.RLock()
@@ -355,6 +393,50 @@ class ScreenSessions:
                 if operation in ("mouse", "text", "key"):
                     raise RuntimeError("screen-input-outcome-unknown; do not retry automatically") from exc
                 raise
+
+    def text(self, caller, session_id, frame_id, geometry_version, text):
+        """Type text of up to MAX_STREAM_UNITS units as sequential packets of at most MAX_TEXT_UNITS.
+
+        Every packet is a normal 'text' operation with the same frame; the next packet is sent only after the
+        previous one is acknowledged and INPUT_SPACING has elapsed. Any refusal or unknown result stops the stream."""
+        if not isinstance(text, str):
+            raise ValueError("invalid-screen-text")
+        try:
+            units = utf16_units(text)
+        except UnicodeEncodeError:
+            raise ValueError("invalid-screen-text") from None
+        if not 1 <= units <= MAX_STREAM_UNITS or any((ord(c) < 32 and c not in "\r\n\t") or 127 <= ord(c) <= 159 for c in text):
+            raise ValueError("invalid-screen-text")
+        parts = split_text(text)
+        if len(parts) == 1:
+            return self.operation(caller, session_id, "text", frame_id=frame_id, geometry_version=geometry_version, text=text)
+        with self._gate:
+            if session_id in self._streaming:
+                raise RuntimeError("screen-text-stream-busy")
+            self._streaming.add(session_id)
+        sent_units = 0
+        try:
+            for index, part in enumerate(parts):
+                if index:
+                    self._sleep(INPUT_SPACING)
+                try:
+                    result = self.operation(caller, session_id, "text", frame_id=frame_id, geometry_version=geometry_version, text=part)
+                except ConfirmedInputRefusal as refusal:
+                    if index == 0:
+                        raise
+                    raise PartialTextInput(refusal.code, index, len(parts), sent_units, refusal.channel_terminated) from refusal
+                except Exception as exc:
+                    if index == 0:
+                        raise
+                    # operation() already dropped the session, so the channel is terminated.
+                    raise PartialTextInput('outcome-unknown', index, len(parts), sent_units, True) from exc
+                if isinstance(result, dict) and result.get("error") in ("input-not-applied", "outcome-unknown"):
+                    return {**result, "partial": index > 0, "chunks_sent": index, "chunks_total": len(parts), "units_sent": sent_units}
+                sent_units += utf16_units(part)
+            return {**result, "chunks_sent": len(parts), "chunks_total": len(parts), "units_sent": sent_units}
+        finally:
+            with self._gate:
+                self._streaming.discard(session_id)
 
     def close_all(self):
         with self._gate:

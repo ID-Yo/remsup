@@ -15,7 +15,11 @@ using System.Windows.Media.Imaging;
 internal sealed class WindowsScreenSurface:IScreenSurface
 {
     int heldMouseButtons = 0;
-    readonly HashSet<ushort> heldKeys = new HashSet<ushort>();
+    // Key-up events owed for key-downs this provider injected and could not release.
+    // Physical keys held by the local owner are never added here.
+    readonly List<Input> heldKeys = new List<Input>();
+    internal Func<Input[],uint> Sender=events=>SendInput((uint)events.Length,events,Marshal.SizeOf(typeof(Input)));
+    bool HoldsKey(ushort virtualKey){lock(heldKeys){foreach(var e in heldKeys)if(e.Data.Keyboard.VirtualKey==virtualKey)return true;}return false;}
     public bool HasPendingRelease{get{return heldMouseButtons!=0||heldKeys.Count!=0;}}
     [StructLayout(LayoutKind.Sequential)] struct Rect {public int Left,Top,Right,Bottom;}
     [StructLayout(LayoutKind.Sequential,CharSet=CharSet.Unicode)] struct MonitorInfo {public int Size;public Rect Monitor,Work;public uint Flags;[MarshalAs(UnmanagedType.ByValTStr,SizeConst=32)] public string Device;}
@@ -38,10 +42,10 @@ internal sealed class WindowsScreenSurface:IScreenSurface
     [DllImport("gdi32.dll")] static extern bool StretchBlt(IntPtr dest,int dx,int dy,int dw,int dh,IntPtr source,int sx,int sy,int sw,int sh,uint operation);
     [StructLayout(LayoutKind.Sequential)] struct NativePoint {public int X,Y;}
     [StructLayout(LayoutKind.Sequential)] struct GuiThreadInfo {public int Size;public uint Flags;public IntPtr Active,Focus,Capture,MenuOwner,MoveSize,Caret;public Rect CaretRect;}
-    [StructLayout(LayoutKind.Sequential)] struct MouseInput {public int X,Y;public uint Data,Flags,Time;public UIntPtr Extra;}
-    [StructLayout(LayoutKind.Explicit)] struct InputUnion {[FieldOffset(0)] public MouseInput Mouse;[FieldOffset(0)] public KeyboardInput Keyboard;}
-    [StructLayout(LayoutKind.Sequential)] struct KeyboardInput {public ushort VirtualKey,Scan;public uint Flags,Time;public UIntPtr Extra;}
-    [StructLayout(LayoutKind.Sequential)] struct Input {public uint Type;public InputUnion Data;}
+    [StructLayout(LayoutKind.Sequential)] internal struct MouseInput {public int X,Y;public uint Data,Flags,Time;public UIntPtr Extra;}
+    [StructLayout(LayoutKind.Explicit)] internal struct InputUnion {[FieldOffset(0)] public MouseInput Mouse;[FieldOffset(0)] public KeyboardInput Keyboard;}
+    [StructLayout(LayoutKind.Sequential)] internal struct KeyboardInput {public ushort VirtualKey,Scan;public uint Flags,Time;public UIntPtr Extra;}
+    [StructLayout(LayoutKind.Sequential)] internal struct Input {public uint Type;public InputUnion Data;}
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll")] static extern bool IsWindow(IntPtr window);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
@@ -50,6 +54,9 @@ internal sealed class WindowsScreenSurface:IScreenSurface
     [DllImport("user32.dll")] static extern IntPtr GetAncestor(IntPtr window,uint flags);
     internal static bool IsCloaked(IntPtr window){IntPtr root=GetAncestor(window,2);return root==IntPtr.Zero||DwmGetWindowAttribute(root,14,out int value,sizeof(int))!=0||value!=0;}
 
+    [DllImport("kernel32.dll",SetLastError=true)] static extern IntPtr OpenProcess(uint access,bool inherit,uint pid);
+    [DllImport("kernel32.dll",SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
+    [DllImport("kernel32.dll",CharSet=CharSet.Unicode,SetLastError=true)] static extern bool QueryFullProcessImageName(IntPtr process,uint flags,StringBuilder name,ref int size);
     [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint thread,ref GuiThreadInfo info);
     [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetClassName(IntPtr window,StringBuilder name,int length);
     [DllImport("advapi32.dll",SetLastError=true)] static extern bool OpenProcessToken(IntPtr process,uint access,out Microsoft.Win32.SafeHandles.SafeAccessTokenHandle token);
@@ -138,16 +145,37 @@ internal sealed class WindowsScreenSurface:IScreenSurface
         }
         finally{SetThreadDpiAwarenessContext(previous);}
     }
-    static uint Submit(Input[] events){int error;return Submit(events,out error);}
-    static uint Submit(Input[] events,out int error){uint sent=SendInput((uint)events.Length,events,Marshal.SizeOf(typeof(Input)));error=Marshal.GetLastWin32Error();if(sent!=(uint)events.Length){try{File.WriteAllText(Path.Combine(Path.GetTempPath(),"RemsupScreenInput.log"),DateTime.UtcNow.ToString("o")+" submitted="+sent+" requested="+events.Length+" win32="+error+" outcome=unknown\n");}catch(IOException){}catch(UnauthorizedAccessException){}}return sent;}
+    uint Submit(Input[] events){int error;return Submit(events,out error);}
+    uint Submit(Input[] events,out int error){uint sent=Sender(events);error=Marshal.GetLastWin32Error();if(sent!=(uint)events.Length){try{File.WriteAllText(Path.Combine(Path.GetTempPath(),"RemsupScreenInput.log"),DateTime.UtcNow.ToString("o")+" submitted="+sent+" requested="+events.Length+" win32="+error+" outcome=unknown\n");}catch(IOException){}catch(UnauthorizedAccessException){}}return sent;}
     static Input KeyEvent(ushort key,ushort scan,uint flags){return new Input{Type=1,Data=new InputUnion{Keyboard=new KeyboardInput{VirtualKey=key,Scan=scan,Flags=flags}}};}
     struct KeyboardTarget {public IntPtr Foreground,Focus;public uint Process,Thread;public long Started;public bool Console;}
     internal static bool ConsoleContext(bool query,string windowClass,bool trustedHost,bool sameUser,bool standard,bool sameSession,IntPtr foreground,IntPtr active,IntPtr capture,IntPtr menu,IntPtr move,uint flags){return query&&windowClass=="ConsoleWindowClass"&&trustedHost&&sameUser&&standard&&sameSession&&(active==IntPtr.Zero||active==foreground)&&capture==IntPtr.Zero&&menu==IntPtr.Zero&&move==IntPtr.Zero&&flags==0;}
+    // The foreground-thread fallback is allowed only when the per-thread query failed, the window is a classic console
+    // and the foreground-thread query reports that same window as the active window.
+    internal static bool ConsoleFallbackAllowed(bool queryOk,string windowClass,IntPtr foreground,IntPtr active){return queryOk&&windowClass=="ConsoleWindowClass"&&foreground!=IntPtr.Zero&&active==foreground;}
+    // Full image path through PROCESS_QUERY_LIMITED_INFORMATION; works across 32/64-bit boundaries
+    // and does not need module enumeration. Returns null on any failure.
+    static string ImagePath(uint pid){
+        IntPtr handle=OpenProcess(0x1000,false,pid);if(handle==IntPtr.Zero)return null;
+        try{var path=new StringBuilder(1024);int size=path.Capacity;return QueryFullProcessImageName(handle,0,path,ref size)&&size>0?path.ToString(0,size):null;}
+        finally{CloseHandle(handle);}
+    }
+    // Verified hosts for a classic console window: exact canonical Windows system paths only.
+    internal static bool TrustedConsoleHost(string path,string windows){
+        if(string.IsNullOrEmpty(path)||string.IsNullOrEmpty(windows)||path.StartsWith("\\\\",StringComparison.Ordinal))return false;
+        try{
+            if(!Path.IsPathFullyQualified(path)||!string.Equals(Path.GetFullPath(path),path,StringComparison.OrdinalIgnoreCase))return false;
+            foreach(string folder in new[]{"System32","SysWOW64"}){
+                string root=Path.Combine(windows,folder);
+                if(string.Equals(path,Path.Combine(root,"conhost.exe"),StringComparison.OrdinalIgnoreCase)||string.Equals(path,Path.Combine(root,"cmd.exe"),StringComparison.OrdinalIgnoreCase)||string.Equals(path,Path.Combine(root,"WindowsPowerShell","v1.0","powershell.exe"),StringComparison.OrdinalIgnoreCase))return true;
+            }
+        }catch(Exception ex) when(ex is ArgumentException||ex is NotSupportedException||ex is PathTooLongException||ex is System.Security.SecurityException){}
+        return false;
+    }
     static bool ClassicConsole(IntPtr foreground,uint pid,GuiThreadInfo gui){
         var name=new StringBuilder(128);if(GetClassName(foreground,name,name.Capacity)==0)return false;
         try{using(var process=Process.GetProcessById((int)pid)){
-            string path=process.MainModule.FileName,system=Environment.GetFolderPath(Environment.SpecialFolder.System);
-            bool trusted=string.Equals(path,Path.Combine(system,"conhost.exe"),StringComparison.OrdinalIgnoreCase)||string.Equals(path,Path.Combine(system,"cmd.exe"),StringComparison.OrdinalIgnoreCase)||string.Equals(path,Path.Combine(system,"WindowsPowerShell","v1.0","powershell.exe"),StringComparison.OrdinalIgnoreCase);
+            bool trusted=TrustedConsoleHost(ImagePath(pid),Environment.GetFolderPath(Environment.SpecialFolder.Windows));
             if(!OpenProcessToken(process.Handle,8,out var token))return false;
             using(token)using(var identity=new System.Security.Principal.WindowsIdentity(token.DangerousGetHandle()))using(var own=System.Security.Principal.WindowsIdentity.GetCurrent()){
                 bool queried=GetTokenInformation(token,20,out int elevated,4,out int needed)&&needed==4;
@@ -163,7 +191,17 @@ internal sealed class WindowsScreenSurface:IScreenSurface
         var monitor=new MonitorInfo{Size=Marshal.SizeOf(typeof(MonitorInfo))};IntPtr monitorHandle=MonitorFromWindow(foreground,0);
         if(monitorHandle==IntPtr.Zero||!GetMonitorInfo(monitorHandle,ref monitor)||monitor.Device!=geometry.MonitorId)throw new InvalidOperationException("foreground-monitor-mismatch");
         var gui=new GuiThreadInfo{Size=Marshal.SizeOf(typeof(GuiThreadInfo))};
-        if(!GetGUIThreadInfo(thread,ref gui))throw new InvalidOperationException("foreground-required");
+        if(!GetGUIThreadInfo(thread,ref gui)){
+            // A classic console window reports its client's thread id, which is not a GUI thread, so the per-thread
+            // query fails (ERROR_INVALID_PARAMETER). Accept the foreground-thread query only for a console window
+            // that is the active window; the executable identity check below still decides eligibility.
+            gui=new GuiThreadInfo{Size=Marshal.SizeOf(typeof(GuiThreadInfo))};
+            var windowClass=new StringBuilder(64);
+            bool classRead=GetClassName(foreground,windowClass,windowClass.Capacity)!=0;
+            bool queryOk=classRead&&windowClass.ToString()=="ConsoleWindowClass"&&GetGUIThreadInfo(0,ref gui);
+            if(!ConsoleFallbackAllowed(queryOk,classRead?windowClass.ToString():"",foreground,gui.Active))throw new InvalidOperationException("foreground-required");
+            gui.Focus=IntPtr.Zero;
+        }
         if(gui.Focus==IntPtr.Zero){
             if(!ClassicConsole(foreground,pid,gui))throw new InvalidOperationException("foreground-required");
             using(var process=Process.GetProcessById((int)pid))return new KeyboardTarget{Foreground=foreground,Focus=IntPtr.Zero,Process=pid,Thread=thread,Started=process.StartTime.ToUniversalTime().Ticks,Console=true};
@@ -182,32 +220,49 @@ internal sealed class WindowsScreenSurface:IScreenSurface
     }
     // Keep each Unicode scalar's down/up events together, but let the receiver
     // consume them before the next scalar. A partial string is never replayed.
-    internal static void SubmitText(string text,Action guard) {
+    static bool SameKey(KeyboardInput a,KeyboardInput b){return a.VirtualKey==b.VirtualKey&&a.Scan==b.Scan&&(a.Flags&~2u)==(b.Flags&~2u);}
+    // Key-up events, in reverse order, for key-downs in the accepted prefix of a batch that were not matched by an accepted key-up.
+    internal static Input[] PendingReleases(Input[] events,uint sent){
+        var down=new List<Input>();
+        for(int i=0;i<events.Length&&i<sent;i++){
+            if(events[i].Type!=1)continue;
+            var key=events[i].Data.Keyboard;int at=down.FindIndex(d=>SameKey(d.Data.Keyboard,key));
+            if((key.Flags&2u)!=0){if(at>=0)down.RemoveAt(at);}else if(at<0)down.Add(events[i]);
+        }
+        var releases=new Input[down.Count];
+        for(int i=0;i<releases.Length;i++){var key=down[down.Count-1-i].Data.Keyboard;releases[i]=KeyEvent(key.VirtualKey,key.Scan,key.Flags|2u);}
+        return releases;
+    }
+    // Release only keys this call pressed; whatever Windows refuses stays owed in heldKeys and blocks new sessions.
+    void ReleaseAfterPartial(Input[] events,uint sent){
+        var releases=PendingReleases(events,sent);if(releases.Length==0)return;
+        uint done=0;try{done=Sender(releases);}catch(Exception){}
+        lock(heldKeys){for(uint i=done;i<releases.Length;i++)heldKeys.Add(releases[i]);}
+    }
+    internal void SubmitText(string text,Action guard) {
         ScreenKeyboard.Validate(text,null);
         bool attempted=false;
         try {
             for(int i=0;i<text.Length;i++) {
                 guard();var scalar=new List<Input>{KeyEvent(0,text[i],4),KeyEvent(0,text[i],6)};
                 if(char.IsHighSurrogate(text[i])){i++;scalar.Add(KeyEvent(0,text[i],4));scalar.Add(KeyEvent(0,text[i],6));}
-                attempted=true;if(Submit(scalar.ToArray())!=(uint)scalar.Count)throw new InvalidOperationException("input-outcome-unknown");
-                Thread.Sleep(25);
+                attempted=true;var batch=scalar.ToArray();uint sent=Submit(batch);if(sent!=(uint)batch.Length){ReleaseAfterPartial(batch,sent);throw new InvalidOperationException("input-outcome-unknown");}
+                Thread.Sleep(10);
             }
         }catch(Exception ex){if(attempted)throw new InvalidOperationException("input-outcome-unknown",ex);throw;}
     }
     static ushort KeyCode(string key) {
-        switch(key){case "ctrl+l":return 0x4c;case "ctrl+a":return 0x41;case "ctrl+s":case "ctrl+shift+s":return 0x53;case "enter":return 0x0d;case "tab":case "shift+tab":return 0x09;case "escape":return 0x1b;case "backspace":return 0x08;case "delete":return 0x2e;case "up":return 0x26;case "down":return 0x28;case "left":return 0x25;case "right":return 0x27;case "home":return 0x24;case "end":return 0x23;default:throw new InvalidOperationException("key-not-allowed");}
+        switch(key){case "ctrl+l":return 0x4c;case "ctrl+a":return 0x41;case "ctrl+c":return 0x43;case "ctrl+v":return 0x56;case "ctrl+x":return 0x58;case "ctrl+z":return 0x5a;case "ctrl+y":return 0x59;case "ctrl+w":return 0x57;case "ctrl+f":return 0x46;case "ctrl+s":case "ctrl+shift+s":return 0x53;case "enter":return 0x0d;case "tab":case "shift+tab":return 0x09;case "escape":return 0x1b;case "backspace":return 0x08;case "delete":return 0x2e;case "up":return 0x26;case "down":return 0x28;case "left":return 0x25;case "right":return 0x27;case "home":return 0x24;case "end":return 0x23;default:throw new InvalidOperationException("key-not-allowed");}
     }
-    static void SubmitKey(string key) {
+    internal void SubmitKey(string key) {
         ScreenKeyboard.Validate(null,key);ushort code=KeyCode(key);bool ctrl=key.StartsWith("ctrl+",StringComparison.Ordinal),shift=key=="shift+tab"||key=="ctrl+shift+s";
         var modifiers=new List<ushort>();if(ctrl)modifiers.Add(17);if(shift)modifiers.Add(16);
         var events=new List<Input>();foreach(ushort modifier in modifiers)events.Add(KeyEvent(modifier,0,0));
         uint extended=(code==0x2e||code==0x26||code==0x28||code==0x25||code==0x27||code==0x24||code==0x23)?1u:0u;
         events.Add(KeyEvent(code,0,extended));events.Add(KeyEvent(code,0,extended|2u));for(int i=modifiers.Count-1;i>=0;i--)events.Add(KeyEvent(modifiers[i],0,2));
         int error;uint sent=Submit(events.ToArray(),out error);if(sent==(uint)events.Count)return;
-        // SendInput inserts an ordered prefix. Release only keys still down from
-        // that prefix, including modifiers this call actually pressed.
-        var held=new List<ushort>();for(int i=0;i<sent;i++){var keyEvent=events[i].Data.Keyboard;if((keyEvent.Flags&2)!=0)held.Remove(keyEvent.VirtualKey);else if(!held.Contains(keyEvent.VirtualKey))held.Add(keyEvent.VirtualKey);}
-        for(int i=held.Count-1;i>=0;i--)SendInput(1,new[]{KeyEvent(held[i],0,2u|((held[i]==code)?extended:0u))},Marshal.SizeOf(typeof(Input)));
+        // SendInput inserts an ordered prefix; release only keys this call left pressed.
+        ReleaseAfterPartial(events.ToArray(),sent);
         throw new InvalidOperationException("input-outcome-unknown");
     }
     public void Keyboard(string text,string key,ScreenGeometry geometry,Action authorize) {
@@ -245,7 +300,7 @@ internal sealed class WindowsScreenSurface:IScreenSurface
                     if(key==1&&(heldMouseButtons&1)!=0)continue;
                     if(key==2&&(heldMouseButtons&2)!=0)continue;
                     if(key==4&&(heldMouseButtons&4)!=0)continue;
-                    lock(heldKeys){if(heldKeys.Contains((ushort)key))continue;}
+                    if(HoldsKey((ushort)key))continue;
                     throw new InvalidOperationException("local-input-active");
                 }
             }
@@ -340,11 +395,8 @@ internal sealed class WindowsScreenSurface:IScreenSurface
         {
             if(heldKeys.Count>0)
             {
-                var events=new List<Input>();
-                var codes=new List<ushort>(heldKeys);
-                foreach(ushort code in codes)events.Add(KeyEvent(code,0,2));
-                int err;uint sent=Submit(events.ToArray(),out err);
-                for(int i=0;i<sent;i++)heldKeys.Remove(codes[i]);
+                uint sent=0;try{sent=Sender(heldKeys.ToArray());}catch(Exception){}
+                heldKeys.RemoveRange(0,(int)Math.Min(sent,(uint)heldKeys.Count));
             }
         }
         return heldMouseButtons==0&&heldKeys.Count==0;

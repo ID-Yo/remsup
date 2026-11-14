@@ -285,13 +285,15 @@ def remsup_screen_mouse(session_id: str, frame_id: str, geometry_version: int, a
 
 @MCP.tool()
 def remsup_screen_text(session_id: str, frame_id: str, geometry_version: int, text: str) -> dict:
-    """Type up to128 UTF-16 units into the eligible foreground application on the selected monitor; active keyboard permission required."""
-    return screen_call("text", lambda caller: SCREEN.operation(caller, session_id, "text", frame_id=frame_id, geometry_version=geometry_version, text=text))
+    """Type up to 1024 UTF-16 units into the eligible foreground application on the selected monitor; active keyboard permission required.
+    Text over 128 units is sent as consecutive packets split at Unicode scalar boundaries, at least 250 ms apart, with the same frame.
+    The stream stops at the first refusal or unclear result and is never retried; the frame must stay under 30 seconds old."""
+    return screen_call("text", lambda caller: SCREEN.text(caller, session_id, frame_id, geometry_version, text))
 
 
 @MCP.tool()
 def remsup_screen_key(session_id: str, frame_id: str, geometry_version: int, key: str) -> dict:
-    """Eligible foreground application: ctrl+l/a/s, ctrl+shift+s, enter, tab/shift+tab, escape, backspace/delete, arrows, home/end. Never auto-retry uncertain input."""
+    """Eligible foreground application: ctrl+l/a/c/v/x/z/y/w/f/s, ctrl+shift+s, enter, tab/shift+tab, escape, backspace/delete, arrows, home/end. Ctrl+V pastes only the clipboard already present on the remote computer. Never auto-retry uncertain input."""
     return screen_call("key", lambda caller: SCREEN.operation(caller, session_id, "key", frame_id=frame_id, geometry_version=geometry_version, key=key))
 
 

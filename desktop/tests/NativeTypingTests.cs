@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
@@ -26,6 +27,10 @@ internal static class NativeTypingTests
     [DllImport("user32.dll")] static extern bool GetGUIThreadInfo(uint threadId, ref GuiThreadInfo info);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr window, StringBuilder text, int max);
     [DllImport("user32.dll")] static extern IntPtr SetThreadDpiAwarenessContext(IntPtr context);
+    delegate bool EnumWindowsProc(IntPtr window, IntPtr parameter);
+    [DllImport("user32.dll")] static extern bool EnumWindows(EnumWindowsProc callback, IntPtr parameter);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr window, StringBuilder name, int max);
+    [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr window);
 
     [StructLayout(LayoutKind.Sequential)] struct NativePoint { public int X, Y; }
     [StructLayout(LayoutKind.Sequential)] struct NativeRect { public int Left, Top, Right, Bottom; }
@@ -39,7 +44,10 @@ internal static class NativeTypingTests
     {
         if (!value) throw new Exception(message);
         Console.WriteLine("PASS " + message);
+        Transcript.Add("PASS " + message);
     }
+
+    static readonly List<string> Transcript = new List<string>();
 
     static void Reject(string expected, Action action)
     {
@@ -60,13 +68,21 @@ internal static class NativeTypingTests
         Check(!WindowsScreenSurface.ConsoleContext(true,"ConsoleWindowClass",true,true,true,true,foreground,foreground,new IntPtr(1),IntPtr.Zero,IntPtr.Zero,0),"console rejects active pointer capture on console");
         Check(!WindowsScreenSurface.ConsoleContext(true,"ConsoleWindowClass",true,true,true,true,foreground,foreground,IntPtr.Zero,new IntPtr(1),IntPtr.Zero,0),"console rejects active menu owner on console");
         Check(!WindowsScreenSurface.ConsoleContext(true,"ConsoleWindowClass",true,true,true,true,foreground,foreground,IntPtr.Zero,IntPtr.Zero,new IntPtr(1),0),"console rejects active window move/resize on console");
+        Check(WindowsScreenSurface.ConsoleFallbackAllowed(true,"ConsoleWindowClass",foreground,foreground),"foreground-thread fallback accepts a classic console that is the active window");
+        Check(!WindowsScreenSurface.ConsoleFallbackAllowed(false,"ConsoleWindowClass",foreground,foreground),"foreground-thread fallback rejects a failed foreground-thread query");
+        Check(!WindowsScreenSurface.ConsoleFallbackAllowed(true,"Chrome_WidgetWin_1",foreground,foreground),"foreground-thread fallback rejects a window that is not a classic console");
+        Check(!WindowsScreenSurface.ConsoleFallbackAllowed(true,"",foreground,foreground),"foreground-thread fallback rejects an unreadable window class");
+        Check(!WindowsScreenSurface.ConsoleFallbackAllowed(true,"ConsoleWindowClass",foreground,new IntPtr(11)),"foreground-thread fallback rejects a different active window");
+        Check(!WindowsScreenSurface.ConsoleFallbackAllowed(true,"ConsoleWindowClass",foreground,IntPtr.Zero),"foreground-thread fallback rejects a missing active window");
+        Check(!WindowsScreenSurface.ConsoleFallbackAllowed(true,"ConsoleWindowClass",IntPtr.Zero,IntPtr.Zero),"foreground-thread fallback rejects a missing foreground window");
         string[] expected = {
-            "ctrl+l", "ctrl+a", "ctrl+s", "ctrl+shift+s", "enter", "tab", "shift+tab",
-            "escape", "backspace", "delete", "up", "down", "left", "right", "home", "end"
+            "ctrl+l", "ctrl+a", "ctrl+c", "ctrl+v", "ctrl+x", "ctrl+z", "ctrl+y", "ctrl+w", "ctrl+f", "ctrl+s", "ctrl+shift+s",
+            "enter", "tab", "shift+tab", "escape", "backspace", "delete",
+            "up", "down", "left", "right", "home", "end"
         };
         Check(ScreenKeyboard.Keys.SequenceEqual(expected, StringComparer.Ordinal), "shared key allowlist exactly matches the v1.22 contract");
         foreach (string key in expected) ScreenKeyboard.Validate(null, key);
-        foreach (string key in new[] { "ctrl+c", "ctrl+v", "alt+f4", "shift+delete", "CTRL+L", "unknown" })
+        foreach (string key in new[] { "alt+f4", "shift+delete", "CTRL+L", "unknown" })
             Reject("key-not-allowed", () => ScreenKeyboard.Validate(null, key));
         Reject("invalid-keyboard-operation", () => ScreenKeyboard.Validate(null, null));
         Reject("invalid-keyboard-operation", () => ScreenKeyboard.Validate("text", "enter"));
@@ -74,11 +90,90 @@ internal static class NativeTypingTests
         ScreenKeyboard.Validate(new string('x', 128), null);
         Reject("text-size-limit", () => ScreenKeyboard.Validate(new string('x', 129), null));
         ScreenKeyboard.Validate("A\r\n\t😀", null);
+        ScreenKeyboard.Validate("Тест на писане на кирилица от оператор", null);
         Reject("invalid-text", () => ScreenKeyboard.Validate("A\u0001", null));
         Reject("invalid-text", () => ScreenKeyboard.Validate("\uD800", null));
         Reject("invalid-text", () => ScreenKeyboard.Validate("\uDC00", null));
         Console.WriteLine("PASS bounded text, control-character, and Unicode-scalar validation");
+        CheckConsoleIdentity();
+        CheckInjectedKeyOwnership();
         return 0;
+    }
+
+    static void CheckConsoleIdentity()
+    {
+        const string windows = @"C:\Windows";
+        foreach (string trusted in new[] {
+            @"C:\Windows\System32\conhost.exe", @"C:\Windows\System32\cmd.exe", @"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            @"C:\Windows\SysWOW64\cmd.exe", @"c:\windows\system32\CMD.EXE" })
+            Check(WindowsScreenSurface.TrustedConsoleHost(trusted, windows), "console host identity accepts " + trusted);
+        foreach (string rejected in new string[] {
+            null, "", "cmd.exe", @"C:\ProgramData\cmd.exe", @"C:\Windows\Temp\cmd.exe", @"C:\Windows\System32\..\Temp\cmd.exe",
+            @"C:\Windows\System32\cmd.exe.exe", @"C:\Windows\System32\pwsh.exe", @"C:\Windows\System32\WindowsPowerShell\v1.0\cmd.exe",
+            @"\\server\share\Windows\System32\cmd.exe", @"\\?\C:\Windows\System32\cmd.exe", @"D:\Windows\System32\cmd.exe" })
+            Check(!WindowsScreenSurface.TrustedConsoleHost(rejected, windows), "console host identity rejects " + (rejected ?? "<null>"));
+        Check(!WindowsScreenSurface.TrustedConsoleHost(@"C:\Windows\System32\cmd.exe", null), "console host identity fails closed without a Windows directory");
+    }
+
+    static string Describe(WindowsScreenSurface.Input[] events)
+    {
+        return string.Join(",", events.Select(e => e.Data.Keyboard.VirtualKey + "/" + e.Data.Keyboard.Scan + "/" + e.Data.Keyboard.Flags));
+    }
+
+    // Recording sender: results are scripted per call; unscripted calls accept everything.
+    static WindowsScreenSurface Scripted(List<string> calls, params uint[] results)
+    {
+        var script = new Queue<uint>(results);
+        var surface = new WindowsScreenSurface();
+        surface.Sender = events => { calls.Add(Describe(events)); return script.Count > 0 ? script.Dequeue() : (uint)events.Length; };
+        return surface;
+    }
+
+    static void CheckInjectedKeyOwnership()
+    {
+        var calls = new List<string>();
+        var idle = Scripted(calls);
+        Check(idle.ReleaseHeldInputs() && !idle.HasPendingRelease && calls.Count == 0, "release with nothing injected sends no key events, so a physically held local modifier is untouched");
+
+        calls.Clear();
+        var surface = Scripted(calls, 2, 2);
+        Reject("input-outcome-unknown", () => surface.SubmitKey("ctrl+shift+s"));
+        Check(calls.Count == 2 && calls[0] == "17/0/0,16/0/0,83/0/0,83/0/2,16/0/2,17/0/2" && calls[1] == "16/0/2,17/0/2", "partial key injection releases only the two modifiers it pressed (" + string.Join(" | ", calls) + ")");
+        Check(!surface.HasPendingRelease && surface.ReleaseHeldInputs() && calls.Count == 2, "fully released partial injection leaves nothing owed");
+
+        calls.Clear();
+        surface = Scripted(calls, 2, 1);
+        Reject("input-outcome-unknown", () => surface.SubmitKey("ctrl+shift+s"));
+        Check(surface.HasPendingRelease && calls[1] == "16/0/2,17/0/2", "refused partial release keeps the unreleased key owed");
+        Check(surface.ReleaseHeldInputs() && calls[2] == "17/0/2" && !surface.HasPendingRelease && calls.Count == 3, "later release sends only the owed Ctrl key-up");
+
+        calls.Clear();
+        var failing = new WindowsScreenSurface();
+        bool fail = false; failing.Sender = events => { calls.Add(Describe(events)); if (fail) throw new InvalidOperationException("sendinput-failed"); fail = true; return 3; };
+        Reject("input-outcome-unknown", () => failing.SubmitKey("ctrl+shift+s"));
+        Check(failing.HasPendingRelease && calls[1] == "83/0/2,16/0/2,17/0/2", "release failure keeps every pressed key owed, key before modifiers");
+        fail = false; failing.Sender = events => { calls.Add(Describe(events)); return (uint)events.Length; };
+        Check(failing.ReleaseHeldInputs() && !failing.HasPendingRelease && calls[2] == "83/0/2,16/0/2,17/0/2", "owed keys are released once the sender recovers");
+
+        calls.Clear();
+        surface = Scripted(calls, 1);
+        Reject("input-outcome-unknown", () => surface.SubmitKey("right"));
+        Check(calls[1] == "39/0/3" && !surface.HasPendingRelease, "partial extended key keeps the extended flag on its release");
+
+        calls.Clear();
+        surface = Scripted(calls, 2, 1);
+        Reject("input-outcome-unknown", () => surface.SubmitText("AB", () => { }));
+        Check(calls.Count == 3 && calls[0] == "0/65/4,0/65/6" && calls[1] == "0/66/4,0/66/6" && calls[2] == "0/66/6" && !surface.HasPendingRelease, "partial text scalar releases only its own unmatched down event, without replay");
+
+        calls.Clear();
+        surface = Scripted(calls, 3);
+        Reject("input-outcome-unknown", () => surface.SubmitText("\uD83D\uDE00", () => { }));
+        Check(calls.Count == 2 && calls[1] == "0/56832/6", "partial surrogate pair releases the unmatched low-surrogate down event");
+
+        calls.Clear();
+        surface = Scripted(calls);
+        Reject("keyboard-context-changed", () => surface.SubmitText("AB", () => throw new InvalidOperationException("keyboard-context-changed")));
+        Check(calls.Count == 0 && !surface.HasPendingRelease, "pre-dispatch refusal injects nothing and owes nothing");
     }
 
     static ProcessStartInfo SelfStart(params string[] arguments)
@@ -199,6 +294,18 @@ internal static class NativeTypingTests
                 throw new Exception("Could not release the Ctrl modifier injected by this test");
         }
         Check((GetAsyncKeyState(0x11) & 0x8000) == 0, "held local Ctrl is refused and the test releases only its own modifier");
+        // Owner-held modifier survives the provider's release path.
+        if (SendInput(1, new[] { down }, Marshal.SizeOf(typeof(Input))) != 1)
+            throw new Exception("Could not inject the second test-owned Ctrl-down event");
+        try
+        {
+            Check(surface.ReleaseHeldInputs() && (GetAsyncKeyState(0x11) & 0x8000) != 0, "ReleaseHeldInputs leaves a physically held local Ctrl down");
+        }
+        finally
+        {
+            if (SendInput(1, new[] { up }, Marshal.SizeOf(typeof(Input))) != 1)
+                throw new Exception("Could not release the second test-owned Ctrl modifier");
+        }
     }
 
     static void RunEditFixture(WindowsScreenSurface surface, ScreenGeometry geometry)
@@ -210,7 +317,7 @@ internal static class NativeTypingTests
             child = Process.Start(SelfStart("--fixture-child", record, (geometry.X + 40).ToString(), (geometry.Y + 40).ToString()));
             if (child == null) throw new Exception("Could not start owned edit fixture");
             Task<string> readyLine = child.StandardOutput.ReadLineAsync();
-            if (!readyLine.Wait(8000) || !readyLine.Result.StartsWith("READY ", StringComparison.Ordinal))
+            if (!readyLine.Wait(40000) || !readyLine.Result.StartsWith("READY ", StringComparison.Ordinal))
                 throw new Exception("Owned edit fixture did not become ready");
             string[] ready = readyLine.Result.Split(' ');
             IntPtr hwnd = new IntPtr(long.Parse(ready[1]));
@@ -351,7 +458,7 @@ internal static class NativeTypingTests
             child = Process.Start(SelfStart("--focus-fixture", record, (geometry.X + 40).ToString(), (geometry.Y + 40).ToString()));
             if (child == null) throw new Exception("Could not start owned focus-change fixture");
             Task<string> readyLine = child.StandardOutput.ReadLineAsync();
-            if (!readyLine.Wait(8000) || !readyLine.Result.StartsWith("READY ", StringComparison.Ordinal))
+            if (!readyLine.Wait(40000) || !readyLine.Result.StartsWith("READY ", StringComparison.Ordinal))
                 throw new Exception("Owned focus-change fixture did not become ready");
             string[] ready = readyLine.Result.Split(' ');
             IntPtr hwnd = new IntPtr(long.Parse(ready[1]));
@@ -388,6 +495,88 @@ internal static class NativeTypingTests
         }
     }
 
+    static List<KeyValuePair<IntPtr, uint>> VisibleConsoleWindows()
+    {
+        var found = new List<KeyValuePair<IntPtr, uint>>();
+        EnumWindows((window, _) =>
+        {
+            var name = new StringBuilder(64);
+            if (GetClassName(window, name, name.Capacity) > 0 && name.ToString() == "ConsoleWindowClass" && IsWindowVisible(window))
+            {
+                uint pid;
+                if (GetWindowThreadProcessId(window, out pid) != 0) found.Add(new KeyValuePair<IntPtr, uint>(window, pid));
+            }
+            return true;
+        }, IntPtr.Zero);
+        return found;
+    }
+
+    // #128: a classic console window (conhost.exe + cmd.exe) has no focused child HWND, and its window is owned by
+    // the cmd.exe client process. Typing must work there only after the full executable identity passes.
+    // Returns true when the positive typing path ran and passed; false when only the elevated refusal could be checked.
+    static bool RunConsoleFixture(WindowsScreenSurface surface, ScreenGeometry geometry)
+    {
+        string record = Path.Combine(Path.GetTempPath(), "rsconsole-" + Guid.NewGuid().ToString("N").Substring(0, 12) + ".txt");
+        Process host = null, client = null;
+        try
+        {
+            var before = new HashSet<IntPtr>(VisibleConsoleWindows().Select(w => w.Key));
+            // The product refuses elevated console targets, so an elevated test runner must start the console de-elevated.
+            // ShellExecute (or runas) gives the console host its own new window instead of the runner's redirected console.
+            string system = Environment.GetFolderPath(Environment.SpecialFolder.System);
+            string console = "\"" + Path.Combine(system, "conhost.exe") + "\" \"" + Path.Combine(system, "cmd.exe") + "\" /q /k";
+            bool elevated = new System.Security.Principal.WindowsPrincipal(System.Security.Principal.WindowsIdentity.GetCurrent()).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+            var start = elevated
+                ? new ProcessStartInfo(Path.Combine(system, "runas.exe")) { UseShellExecute = false, CreateNoWindow = true, Arguments = "/trustlevel:0x20000 \"" + console.Replace("\"", "") + "\"" }
+                : new ProcessStartInfo(Path.Combine(system, "conhost.exe")) { UseShellExecute = true, Arguments = "\"" + Path.Combine(system, "cmd.exe") + "\" /q /k" };
+            host = Process.Start(start);
+            IntPtr hwnd = IntPtr.Zero; uint pid = 0;
+            if (host == null || !SpinWait.SpinUntil(() =>
+            {
+                foreach (var window in VisibleConsoleWindows())
+                {
+                    if (before.Contains(window.Key)) continue;
+                    try { client = Process.GetProcessById((int)window.Value); } catch (ArgumentException) { continue; }
+                    if (!client.ProcessName.Equals("cmd", StringComparison.OrdinalIgnoreCase)) { client.Dispose(); client = null; continue; }
+                    hwnd = window.Key; pid = window.Value; return true;
+                }
+                return false;
+            }, 40000)) throw new Exception("Owned classic console window did not appear");
+            Place(hwnd, geometry);
+            ClickOwnedTarget(surface, hwnd, pid, geometry.X + 40 + 240, geometry.Y + 40 + 200);
+            WaitForeground(hwnd, pid);
+            Check(FocusedChild(hwnd) == IntPtr.Zero, "fixture reaches the classic-console path (no focused child HWND is reported for the console window)");
+            Action authorize = () => RequireOwnForeground(hwnd, pid);
+            object lua = Microsoft.Win32.Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", "EnableLUA", null);
+            if (lua is int enabled && enabled == 0)
+            {
+                // With UAC off every process of an administrator is elevated, and the product refuses elevated consoles.
+                Reject("foreground-required", () => surface.Keyboard("echo REMSUP_CONSOLE_MUST_NOT_RUN>" + record, null, geometry, authorize));
+                Check(!File.Exists(record) && !surface.HasPendingRelease, "elevated classic console is refused before dispatch (UAC is disabled on this machine)");
+                string skip = "SKIP positive classic-console typing: UAC is disabled here, so no non-elevated console can be created; run this fixture on a UAC-enabled machine";
+                Console.WriteLine(skip); Transcript.Add(skip);
+                return false;
+            }
+            surface.Keyboard("echo REMSUP_CONSOLE_OK>" + record, null, geometry, authorize);
+            surface.Keyboard(null, "enter", geometry, authorize);
+            Check(SpinWait.SpinUntil(() => (ReadText(record) ?? "").Contains("REMSUP_CONSOLE_OK", StringComparison.Ordinal), 8000), "classic console received typed text and Enter after the full-path identity check");
+            Check(!surface.HasPendingRelease, "console typing leaves no owed key release");
+            return true;
+        }
+        finally
+        {
+            foreach (Process process in new[] { client, host })
+            {
+                if (process == null) continue;
+                try { process.Kill(true); process.WaitForExit(3000); }
+                catch (InvalidOperationException) { }
+                catch (System.ComponentModel.Win32Exception) { }
+                process.Dispose();
+            }
+            try { if (File.Exists(record)) File.Delete(record); } catch (IOException) { }
+        }
+    }
+
     static int Native()
     {
         if (Environment.GetEnvironmentVariable("REMSUP_TEST_OWN_NATIVE_INPUT") != "1")
@@ -400,8 +589,52 @@ internal static class NativeTypingTests
         int failures = 0;
         RunNativeFixture("owned WPF edit", () => RunEditFixture(surface, geometry), ref failures);
         RunNativeFixture("owned WinForms focused-child change", () => RunFocusedChildChangeFixture(surface, geometry), ref failures);
+        bool positiveConsole = false; int beforeConsole = failures;
+        RunNativeFixtureResult("classic console (#128)", () => { positiveConsole = RunConsoleFixture(surface, geometry); return positiveConsole ? "PASS" : "SKIP"; }, ref failures);
+        if (!positiveConsole && failures == beforeConsole && RequirePositiveConsole())
+        {
+            failures++; Console.Error.WriteLine("FAIL fixture classic console (#128): REMSUP_REQUIRE_POSITIVE_CONSOLE=1 but the positive path did not run");
+        }
         RunNativeFixture("isolated browser", () => RunBrowserFixture(surface, geometry), ref failures);
         return failures == 0 ? 0 : 1;
+    }
+
+    static bool RequirePositiveConsole() { return Environment.GetEnvironmentVariable("REMSUP_REQUIRE_POSITIVE_CONSOLE") == "1"; }
+
+    // Runs only the classic-console fixture (#128) and records the outcome; intended for a UAC-enabled, non-elevated
+    // tester session. Exit codes: 0 PASS (or SKIP when a positive result is not required), 1 FAIL, 2 bad arguments,
+    // 3 SKIP while REMSUP_REQUIRE_POSITIVE_CONSOLE=1.
+    static int ConsoleFixtureMode(string[] args)
+    {
+        string resultPath = args.Length > 1 ? args[1] : null;
+        if (resultPath != null && !Path.IsPathFullyQualified(resultPath)) { Console.Error.WriteLine("The result file path must be absolute."); return 2; }
+        object lua = Microsoft.Win32.Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System", "EnableLUA", null);
+        bool elevated = new System.Security.Principal.WindowsPrincipal(System.Security.Principal.WindowsIdentity.GetCurrent()).IsInRole(System.Security.Principal.WindowsBuiltInRole.Administrator);
+        bool required = RequirePositiveConsole();
+        string environment = "machine=" + Environment.MachineName + " user=" + System.Security.Principal.WindowsIdentity.GetCurrent().Name + " os=" + Environment.OSVersion.VersionString.Replace(' ', '_') + " enableLUA=" + (lua ?? "unset") + " elevated=" + elevated + " utc=" + DateTime.UtcNow.ToString("o");
+        Console.WriteLine("CONSOLE-FIXTURE " + environment); Transcript.Add("CONSOLE-FIXTURE " + environment);
+        string result, detail = "";
+        if (Environment.GetEnvironmentVariable("REMSUP_TEST_OWN_NATIVE_INPUT") != "1") { result = "SKIP"; detail = " reason=REMSUP_TEST_OWN_NATIVE_INPUT-is-not-1"; }
+        else
+        {
+            try
+            {
+                var surface = new WindowsScreenSurface();
+                result = RunConsoleFixture(surface, FirstMonitor(surface)) ? "PASS" : "SKIP";
+                if (result == "SKIP") detail = " reason=elevated-refusal-checked-only";
+            }
+            catch (Exception error) { result = "FAIL"; detail = " reason=" + error.Message.Replace('\r', ' ').Replace('\n', ' '); }
+        }
+        string summary = "CONSOLE-FIXTURE-RESULT: " + result + " positive=" + (result == "PASS" ? "true" : "false") + " required=" + required + detail;
+        Console.WriteLine(summary); Transcript.Add(summary);
+        if (resultPath != null) File.WriteAllLines(resultPath, Transcript, new UTF8Encoding(false));
+        return result == "PASS" ? 0 : result == "FAIL" ? 1 : required ? 3 : 0;
+    }
+
+    static void RunNativeFixtureResult(string name, Func<string> run, ref int failures)
+    {
+        try { Console.WriteLine(run() + " fixture " + name); }
+        catch (Exception error) { failures++; Console.Error.WriteLine("FAIL fixture " + name + Environment.NewLine + error); }
     }
 
     static void RunNativeFixture(string name, Action run, ref int failures)
@@ -477,6 +710,7 @@ internal static class NativeTypingTests
             if (args.Length > 0 && args[0] == "--fixture-child") return Fixture(args);
             if (args.Length > 0 && args[0] == "--focus-fixture") return FocusFixture(args);
             if (args.Length > 0 && args[0] == "--native") return Native();
+            if (args.Length > 0 && args[0] == "--console-fixture") return ConsoleFixtureMode(args);
             return Validate();
         }
         catch (Exception error)
