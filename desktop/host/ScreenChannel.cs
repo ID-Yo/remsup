@@ -45,7 +45,7 @@ internal sealed class ScreenChannel
         if(seen.Count!=names.Count)throw new InvalidDataException("missing-field");
     }
     static bool RefusedBeforeDispatch(InvalidOperationException ex){
-        switch(ex.Message){case "permission-required":case "mouse-disabled":case "typing-disabled":case "control-required":case "session-mismatch":case "stale-frame":case "geometry-changed":case "geometry-version-mismatch":case "coordinates-out-of-range":case "invalid-action":case "invalid-scroll":case "input-rate-limit":case "protected-window":case "desktop-unavailable":case "dpi-unavailable":case "monitor-unavailable":case "local-input-active":case "foreground-required":case "foreground-monitor-mismatch":case "modifiers-held":case "keyboard-context-changed":case "invalid-keyboard-operation":case "key-not-allowed":case "text-size-limit":case "invalid-text":return true;default:return false;}
+        switch(ex.Message){case "permission-required":case "mouse-disabled":case "typing-disabled":case "control-required":case "session-mismatch":case "stale-frame":case "geometry-changed":case "geometry-version-mismatch":case "coordinates-out-of-range":case "invalid-action":case "invalid-scroll":case "input-rate-limit":case "protected-window":case "desktop-unavailable":case "dpi-unavailable":case "monitor-unavailable":case "local-input-active":case "foreground-required":case "foreground-monitor-mismatch":case "modifiers-held":case "keyboard-context-changed":case "invalid-keyboard-operation":case "key-not-allowed":case "text-size-limit":case "invalid-text":case "text-stream-ended":case "text-stream-mismatch":case "text-stream-expired":case "text-stream-active":case "text-stream-unsupported":case "text-stream-sequence":case "text-stream-overrun":return true;default:return false;}
     }
     static void InputFailure(Stream stream,string requestId,Guid lease,Exception ex)
     {
@@ -54,6 +54,14 @@ internal sealed class ScreenChannel
         string code=refused?ex.Message:failure?.Message=="input-not-applied"?"input-not-applied":"outcome-unknown";
         bool? dispatched=refused?false:failure?.Dispatched;
         Write(stream,new{version=1,request_id=requestId,session_id=lease.ToString("D"),error=code,dispatched,channel_terminated=false});stream.Flush();
+    }
+    static void StreamFailure(Stream stream,string requestId,Guid lease,Guid streamId,bool open,Exception ex)
+    {
+        bool refused=ex is InvalidOperationException invalid&&RefusedBeforeDispatch(invalid);
+        var failure=ex as ScreenInputFailure;
+        string code=refused?ex.Message:failure?.Message=="input-not-applied"?"input-not-applied":"outcome-unknown";
+        bool? dispatched=refused?false:failure?.Dispatched;
+        Write(stream,new{version=1,request_id=requestId,session_id=lease.ToString("D"),error=code,dispatched,channel_terminated=false,stream_id=streamId==Guid.Empty?null:streamId.ToString("D"),stream_open=open});stream.Flush();
     }
     internal bool ProcessOne(Stream stream,string connection)
     {
@@ -66,7 +74,7 @@ internal sealed class ScreenChannel
             Fields(request,"version","request_id","operation");
             var monitors=new List<object>();foreach(var monitor in access.Monitors())monitors.Add(new{monitor_id=monitor.MonitorId,geometry_version=monitor.Version,x=monitor.X,y=monitor.Y,width=monitor.Width,height=monitor.Height});
             string[] mouseActions=new[]{"click","double-click","right-click","scroll","move","down","up","left-down","left-up","right-down","right-up","middle-down","middle-up"};
-            Write(stream,new{version=1,request_id=requestId,monitors,keyboard_control=true,text_max_utf16=128,keys=ScreenKeyboard.Keys,mouse_actions=mouseActions,min_capture_interval_ms=50,auto_accept=access.AutoAcceptLocal,view_requires_local_consent=!access.AutoAcceptLocal,control_requires_separate_local_consent=!access.AutoAcceptLocal,control_allowed=access.ControlAllowed});return true;
+            Write(stream,new{version=1,request_id=requestId,monitors,keyboard_control=true,text_max_utf16=128,text_stream_max_utf16=access.TextStreamLimit,keys=ScreenKeyboard.Keys,mouse_actions=mouseActions,min_capture_interval_ms=50,auto_accept=access.AutoAcceptLocal,view_requires_local_consent=!access.AutoAcceptLocal,control_requires_separate_local_consent=!access.AutoAcceptLocal,control_allowed=access.ControlAllowed});return true;
         }
         Guid lease;
         if(operation=="request")
@@ -119,6 +127,30 @@ internal sealed class ScreenChannel
                 try{access.Keyboard(connection,lease,Id(request,"frame_id"),geometryVersion,operation=="text"?value:null,operation=="key"?value:null);}
                 catch(Exception ex){InputFailure(stream,requestId,lease,ex);return true;}
             }
+            else if(operation=="text.begin"||operation=="text.chunk"||operation=="text.end") {
+                // Long text (#136): begin binds the frame and target once, each chunk (at most 128 UTF-16 units) is typed against that
+                // binding, end closes the stream. A refusal never closes the screen session.
+                Guid frameId=Guid.Empty,streamId=Guid.Empty;int geometryVersion=0,total=0,sequence=0;string chunk=null;
+                if(operation=="text.begin"){
+                    Fields(request,"version","request_id","operation","session_id","frame_id","geometry_version","total_units");
+                    geometryVersion=request.GetProperty("geometry_version").GetInt32();if(geometryVersion<1)throw new InvalidDataException("invalid-geometry-version");
+                    total=request.GetProperty("total_units").GetInt32();frameId=Id(request,"frame_id");
+                }else if(operation=="text.chunk"){
+                    Fields(request,"version","request_id","operation","session_id","stream_id","sequence","text");
+                    streamId=Id(request,"stream_id");sequence=request.GetProperty("sequence").GetInt32();chunk=request.GetProperty("text").GetString();if(chunk==null)throw new InvalidDataException("invalid-field");
+                }else{
+                    Fields(request,"version","request_id","operation","session_id","stream_id");streamId=Id(request,"stream_id");
+                }
+                TextStreamStatus status;
+                try{
+                    if(operation=="text.begin"){streamId=access.TextBegin(connection,lease,frameId,geometryVersion,total);status=new TextStreamStatus{Id=streamId,Typed=0,Total=total};}
+                    else if(operation=="text.chunk")status=access.TextChunk(connection,lease,streamId,sequence,chunk);
+                    else status=access.TextEnd(connection,lease,streamId);
+                }catch(Exception ex){StreamFailure(stream,requestId,lease,operation=="text.begin"?Guid.Empty:streamId,operation!="text.begin"&&access.TextStreamOpen(streamId),ex);return true;}
+                var current=access.Snapshot;
+                Write(stream,new{version=1,request_id=requestId,session_id=lease.ToString("D"),state=current.State.ToString(),can_view=current.CanView,can_control=current.CanControl,remaining_ms=current.RemainingMs,stream_id=status.Id.ToString("D"),typed_units=status.Typed,total_units=status.Total,complete=status.Complete});
+                stream.Flush();return true;
+            }
             else if(operation=="mouse")
             {
                 Fields(request,"version","request_id","operation","session_id","frame_id","geometry_version","action","x","y","scroll_steps");
@@ -130,6 +162,9 @@ internal sealed class ScreenChannel
         }
         if(operation=="close")access.Disconnect(connection);
         var snapshot=access.Snapshot;
-        Write(stream,new{version=1,request_id=requestId,session_id=lease.ToString("D"),state=snapshot.State.ToString(),can_view=snapshot.CanView,can_control=snapshot.CanControl,remaining_ms=snapshot.RemainingMs});stream.Flush();return operation!="close";
+        // The request answer tells the operator whether this receiver types long text as a stream (#136); older receivers omit the field.
+        if(operation=="request")Write(stream,new{version=1,request_id=requestId,session_id=lease.ToString("D"),state=snapshot.State.ToString(),can_view=snapshot.CanView,can_control=snapshot.CanControl,remaining_ms=snapshot.RemainingMs,text_stream_max_utf16=access.TextStreamLimit});
+        else Write(stream,new{version=1,request_id=requestId,session_id=lease.ToString("D"),state=snapshot.State.ToString(),can_view=snapshot.CanView,can_control=snapshot.CanControl,remaining_ms=snapshot.RemainingMs});
+        stream.Flush();return operation!="close";
     }
 }

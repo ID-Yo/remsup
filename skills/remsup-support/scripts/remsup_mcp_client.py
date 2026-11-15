@@ -18,7 +18,13 @@ class ClientError(Exception):
     def __init__(self,message,details=None):
         super().__init__(message);self.details=details or {}
 
-SCREEN_REFUSAL_CODES=frozenset(('permission-required','mouse-disabled','typing-disabled','control-required','session-mismatch','stale-frame','geometry-changed','geometry-version-mismatch','coordinates-out-of-range','invalid-action','invalid-scroll','input-rate-limit','protected-window','desktop-unavailable','dpi-unavailable','monitor-unavailable','local-input-active','foreground-required','foreground-monitor-mismatch','modifiers-held','keyboard-context-changed','invalid-keyboard-operation','key-not-allowed','text-size-limit','invalid-text','lease-expired'))
+SCREEN_REFUSAL_CODES=frozenset(('permission-required','mouse-disabled','typing-disabled','control-required','session-mismatch','stale-frame','geometry-changed','geometry-version-mismatch','coordinates-out-of-range','invalid-action','invalid-scroll','input-rate-limit','protected-window','desktop-unavailable','dpi-unavailable','monitor-unavailable','local-input-active','foreground-required','foreground-monitor-mismatch','modifiers-held','keyboard-context-changed','invalid-keyboard-operation','key-not-allowed','text-size-limit','invalid-text','text-stream-ended','text-stream-mismatch','text-stream-expired','text-stream-active','text-stream-unsupported','text-stream-sequence','text-stream-overrun','lease-expired'))
+# Refusals the server raises before any request reaches the receiver; each one names its own reason.
+LOCAL_REFUSALS={
+    'screen-text-too-long':'The text is longer than this receiver accepts; split it, or use a receiver with text streams (v1.55 or newer, up to 20000 UTF-16 units).',
+    'invalid-screen-text':'The text is empty or contains characters Remsup does not type (control characters other than tab and newline, or a lone surrogate).',
+    'screen-text-stream-busy':'A text stream is already running on this session; follow it with text-progress or stop it with text-cancel.',
+}
 FILE_ERROR_CODES=frozenset(('permission-required','permission-revoked','access-denied','parent-missing','source-missing','invalid-path','reparse-path','path-unavailable','partial-create-failed','insufficient-space','invalid-metadata','invalid-offset','invalid-request','invalid-chunk','size-mismatch','integrity-failed','source-changed','destination-exists','destination-changed','interrupted','transfer-timeout','cancelled','busy','unsupported-transfer','invalid-response','outcome-unknown','device-unavailable','owner-mismatch','capacity-full','transfer-expired','invalid-local-path','local-handle-query-failed','local-reparse-path','local-path-unavailable','local-source-changed','file-too-large','incomplete-chunk','invalid-transfer-metadata','remote-chunk-failed'))
 DIAGNOSTIC_STATES=frozenset(('Stopped','Connecting','RelayWaiting','SessionActive','Reconnecting','Failed'))
 DIAGNOSTIC_CHECK_RESULTS=frozenset(('Current','Available','Error','Disabled'))
@@ -122,8 +128,18 @@ def screen_refusal(text):
     try:
         value=json.JSONDecoder().raw_decode(text[text.index('{'):])[0]
         if ((value.get('error') in SCREEN_REFUSAL_CODES and value.get('dispatched') is False) or (value.get('error')=='input-not-applied' and value.get('dispatched') is True) or (value.get('error')=='outcome-unknown' and value.get('dispatched') is None)) and type(value.get('channel_terminated')) is bool:
-            return {key:value[key] for key in ('error','dispatched','channel_terminated')}
+            shown={key:value[key] for key in ('error','dispatched','channel_terminated')}
+            if isinstance(value.get('reason'),str) and len(value['reason'])<=200:shown['reason']=value['reason']
+            return shown
     except (ValueError,TypeError,AttributeError):pass
+
+def local_refusal(text):
+    for code,reason in LOCAL_REFUSALS.items():
+        if code in text:
+            details={'dispatched':False,'channel_terminated':False,'reason':reason}
+            limit=re.search(r'at most (\d+) UTF-16 units',text) if code=='screen-text-too-long' else None
+            if limit:details['max_units']=int(limit.group(1))
+            return code,details
 
 def frame_age(frame,received):
     try:return round(max(0,time.time()-datetime.fromisoformat(frame['captured_utc'].replace('Z','+00:00')).timestamp()),2)
@@ -180,7 +196,7 @@ async def execute(request, call, emit=None, next_action=None):
     # Capabilities closes its transient SCREEN channel; this is a new request, never a replay.
     await asyncio.sleep(1.1)
     response=await call('remsup_screen_request',{**credential,'monitor_id':request['monitor_id'],'control':bool(request.get('control'))})
-    sid=response['session_id'];actions=iter(request.get('screen_actions',[]));results=[]
+    sid=response['session_id'];actions=iter(request.get('screen_actions',[]));results=[];text_running=False
     try:
         end=time.monotonic()+30
         while True:
@@ -228,23 +244,49 @@ async def execute(request, call, emit=None, next_action=None):
                 if result.get('settings_error')=='outcome-unknown' or result.get('connection_may_close') is True:
                     break
                 continue
-            fields={'capture':set(),'status':set(),'mouse':{'frame_id','geometry_version','action','x','y','scroll_steps'},'text':{'frame_id','geometry_version','text'},'key':{'frame_id','geometry_version','key'}}
+            fields={'capture':set(),'status':set(),'mouse':{'frame_id','geometry_version','action','x','y','scroll_steps'},'text':{'frame_id','geometry_version','text'},'text-progress':{'wait','wait_seconds'},'text-cancel':set(),'key':{'frame_id','geometry_version','key'}}
             # Wrapper action is named operation for mouse to retain its protocol action.
             kind=action.get('operation',kind)
             if kind not in fields:raise ClientError('unsupported-screen-action')
             args={k:v for k,v in action.items() if k not in ('operation','action') or k=='action' and kind=='mouse'}
             if set(args)-fields[kind]:raise ClientError('unsupported-screen-fields')
+            if kind=='text-progress':
+                # The action calls it wait; the server tool parameter is wait_seconds (0..45).
+                if 'wait' in args and 'wait_seconds' in args:raise ClientError('unsupported-screen-fields')
+                if 'wait' in args:args['wait_seconds']=args.pop('wait')
+                if 'wait_seconds' in args and (type(args['wait_seconds']) not in (int,float) or not 0<=args['wait_seconds']<=45):raise ClientError('invalid-text-progress-wait: 0 to 45 seconds')
             if kind in ('mouse','text','key'):
                 if not last or args.get('frame_id')!=last.get('frame_id') or args.get('geometry_version')!=last.get('geometry_version'):raise ClientError('screen-input-requires-latest-inspected-frame')
             age=frame_age(last,received) if last else None
             if emit:emit({'operation':kind,'frame_age_seconds':age,'warning':'Take and inspect a new capture before input; frame is older than 15 seconds.' if age is not None and age>15 else None})
-            result=await call('remsup_screen_'+kind,{'session_id':sid,**args})
+            try:
+                result=await call('remsup_screen_'+kind.replace('-','_'),{'session_id':sid,**args})
+            except ClientError as refusal:
+                # A confirmed refusal leaves the screen session open on the server. In interactive use the run goes on, so the
+                # operator can capture again, cancel or retry; a scripted run still stops here and closes the session.
+                if not (next_action and refusal.details.get('dispatched') is False and refusal.details.get('channel_terminated') is False):raise
+                if str(refusal) in ('stale-frame','geometry-version-mismatch'):last=None
+                results.append({'operation':kind,'refused':{'error':str(refusal),**refusal.details}})
+                if emit:emit(results[-1])
+                continue
+            if kind=='text' and not next_action:
+                # Nobody is there to follow a running stream, and closing the session would cancel it: wait for the end.
+                while result.get('result')=='running':
+                    result=await call('remsup_screen_text_progress',{'session_id':sid,'wait_seconds':30})
             if kind=='capture':last=result;received=time.monotonic()
             elif result.get('error') in ('input-not-applied','outcome-unknown'):last=None
+            if kind in ('text','text-progress','text-cancel'):text_running=result.get('result')=='running'
             results.append({'operation':kind,'result':result})
             if emit:emit(results[-1])
         return {'screen':results}
     finally:
+        if text_running:
+            # A text stream still typing is stopped cleanly before the session ends; typed units stay reported.
+            try:
+                stopped=await asyncio.shield(call('remsup_screen_text_cancel',{'session_id':sid}))
+                if emit:emit({'cleanup_text':stopped.get('result'),'typed_units':stopped.get('typed_units'),'total_units':stopped.get('total_units')})
+            except Exception:
+                if emit:emit({'cleanup_text':'text-cancel-failed; the session close ends the stream'})
         try:
             closed=await asyncio.shield(call('remsup_screen_close',{'session_id':sid}))
             if emit:emit({'cleanup':closed.get('result','closed'),'channel_terminated':True})
@@ -307,6 +349,8 @@ async def sdk_run(request,endpoint):
                     text=' '.join(texts)
                     refusal=screen_refusal(text) if name.startswith('remsup_screen_') else None
                     if refusal:raise ClientError(refusal['error'],refusal)
+                    local=local_refusal(text) if name.startswith('remsup_screen_') else None
+                    if local:raise ClientError(local[0],local[1])
                     category=remote_error_category(text)
                     if category=='outcome-unknown':raise ClientError(category,{'dispatched':None,'channel_terminated':True,'warning':'Do not retry automatically; open a new session, take and inspect a new capture.'})
                     raise ClientError(category+': no automatic retry; outcome may be unknown')
@@ -365,7 +409,7 @@ def main():
         if request.get('operation') not in ('health','exec','diagnostics','screen','upload','download','cancel','status') or not 1<=request.get('timeout',0)<=90:raise ClientError('invalid-operation-or-timeout')
         validate_execution_timeout(request)
         with tunnel(request['config']) as endpoint:
-            budget=1830 if request['operation'] in ('upload','download') else request['timeout']*2+360 if request['operation']=='exec' else 630 if request.get('interactive') else min(300,request['timeout']*5)
+            budget=1830 if request['operation'] in ('upload','download') else request['timeout']*2+360 if request['operation']=='exec' else 630 if request.get('interactive') or any(isinstance(a,dict) and a.get('action')=='text' for a in request.get('screen_actions',[])) else min(300,request['timeout']*5)
             result=asyncio.run(asyncio.wait_for(sdk_run(request,endpoint),budget))
         print(sanitize({'ok':True,**result},request),flush=True)
         return 0

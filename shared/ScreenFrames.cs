@@ -68,6 +68,11 @@ internal sealed class ScreenFrames
     public void ValidateKeyboard(string connection,Guid lease,Guid frame,ScreenGeometry current,int geometryVersion) {
         lock(gate){ValidateContext(connection,lease,frame,current,geometryVersion);long now=milliseconds();if(now-lastInput<200)throw new InvalidOperationException("input-rate-limit");lastInput=now;}
     }
+    // A chunk of an open text stream: the frame was validated when the stream began and the receiver-side target binding replaces
+    // frame freshness. Lease and the shared input clock still apply.
+    public void ValidateStreamInput(string connection,Guid lease) {
+        lock(gate){session.Require(connection,lease,true);long now=milliseconds();if(now-lastInput<200)throw new InvalidOperationException("input-rate-limit");lastInput=now;}
+    }
     public ScreenPoint ValidateMouse(string connection,Guid lease,Guid frame,ScreenGeometry current,string action,int x,int y,int steps,int geometryVersion=-1)
     {
         lock(gate)

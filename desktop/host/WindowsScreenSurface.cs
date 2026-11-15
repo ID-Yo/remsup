@@ -12,7 +12,7 @@ using System.Windows.Media.Imaging;
 
 // Controlled-test provider: requires visible local consent. Native tests target
 // only their separate test-owned child window; never capture a personal desktop.
-internal sealed class WindowsScreenSurface:IScreenSurface
+internal sealed class WindowsScreenSurface:IScreenSurface,ITextStreamSurface
 {
     int heldMouseButtons = 0;
     // Key-up events owed for key-downs this provider injected and could not release.
@@ -72,13 +72,18 @@ internal sealed class WindowsScreenSurface:IScreenSurface
     [DllImport("user32.dll")] static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll",SetLastError=true)] static extern uint SendInput(uint count,Input[] inputs,int size);
     [DllImport("user32.dll")] static extern short GetAsyncKeyState(int key);
+    // A process never changes its Windows session. Process.GetCurrentProcess().SessionId enumerated every process on each call
+    // (about 7 ms), and it ran twice per scalar in the typing guard: that was most of the 5 s per 128 characters of #136.
+    [DllImport("kernel32.dll")] static extern bool ProcessIdToSessionId(uint process,out uint session);
+    static readonly int OwnSessionId=CurrentSessionId();
+    static int CurrentSessionId(){uint session;if(!ProcessIdToSessionId((uint)Environment.ProcessId,out session))throw new InvalidOperationException("session-unavailable");return (int)session;}
     readonly Dictionary<string,ScreenGeometry> monitors=new Dictionary<string,ScreenGeometry>();int version=1;
     public bool IsInteractive
     {
         get
         {
             IntPtr state;int length;
-            if(!WTSQuerySessionInformation(IntPtr.Zero,Process.GetCurrentProcess().SessionId,8,out state,out length))return false;
+            if(!WTSQuerySessionInformation(IntPtr.Zero,OwnSessionId,8,out state,out length))return false;
             try{if(length<4||Marshal.ReadInt32(state)!=0)return false;}finally{WTSFreeMemory(state);}
             IntPtr desktop=OpenInputDesktop(0,false,1);if(desktop==IntPtr.Zero)return false;
             try{var name=new StringBuilder(128);int needed;return GetUserObjectInformation(desktop,2,name,name.Capacity*2,out needed)&&name.ToString()=="Default";}
@@ -239,17 +244,24 @@ internal sealed class WindowsScreenSurface:IScreenSurface
         uint done=0;try{done=Sender(releases);}catch(Exception){}
         lock(heldKeys){for(uint i=done;i<releases.Length;i++)heldKeys.Add(releases[i]);}
     }
+    // Pause after each scalar so the guard of the next one sees what the previous one did. The default timer tick is 15.6 ms, so
+    // Sleep(10) cost 16 ms per scalar; a 1 ms timer period for the duration of one text request makes this pause about 3 ms.
+    const int SettleMilliseconds=3;
+    [DllImport("winmm.dll")] static extern uint timeBeginPeriod(uint milliseconds);
+    [DllImport("winmm.dll")] static extern uint timeEndPeriod(uint milliseconds);
     internal void SubmitText(string text,Action guard) {
         ScreenKeyboard.Validate(text,null);
         bool attempted=false;
+        bool finer=timeBeginPeriod(1)==0;
         try {
             for(int i=0;i<text.Length;i++) {
                 guard();var scalar=new List<Input>{KeyEvent(0,text[i],4),KeyEvent(0,text[i],6)};
                 if(char.IsHighSurrogate(text[i])){i++;scalar.Add(KeyEvent(0,text[i],4));scalar.Add(KeyEvent(0,text[i],6));}
                 attempted=true;var batch=scalar.ToArray();uint sent=Submit(batch);if(sent!=(uint)batch.Length){ReleaseAfterPartial(batch,sent);throw new InvalidOperationException("input-outcome-unknown");}
-                Thread.Sleep(10);
+                Thread.Sleep(SettleMilliseconds);
             }
         }catch(Exception ex){if(attempted)throw new InvalidOperationException("input-outcome-unknown",ex);throw;}
+        finally{if(finer)timeEndPeriod(1);}
     }
     static ushort KeyCode(string key) {
         switch(key){case "ctrl+l":return 0x4c;case "ctrl+a":return 0x41;case "ctrl+c":return 0x43;case "ctrl+v":return 0x56;case "ctrl+x":return 0x58;case "ctrl+z":return 0x5a;case "ctrl+y":return 0x59;case "ctrl+w":return 0x57;case "ctrl+f":return 0x46;case "ctrl+s":case "ctrl+shift+s":return 0x53;case "enter":return 0x0d;case "tab":case "shift+tab":return 0x09;case "escape":return 0x1b;case "backspace":return 0x08;case "delete":return 0x2e;case "up":return 0x26;case "down":return 0x28;case "left":return 0x25;case "right":return 0x27;case "home":return 0x24;case "end":return 0x23;default:throw new InvalidOperationException("key-not-allowed");}
@@ -270,6 +282,16 @@ internal sealed class WindowsScreenSurface:IScreenSurface
         Action guard=()=>{RequireKeyboardTarget(geometry,target);RequireNoLocalModifiers();authorize();RequireKeyboardTarget(geometry,target);RequireNoLocalModifiers();};
         if(text!=null){SubmitText(text,guard);return;}
         guard();SubmitKey(key);
+    }
+    // Long text (#136): the target is read once when the stream begins and every chunk is typed under the same per-scalar guard
+    // against it, so a changed foreground window or focus stops the stream at the next scalar.
+    public object BeginText(ScreenGeometry geometry,Action authorize) {
+        KeyboardTarget target=ReadKeyboardTarget(geometry);RequireNoLocalModifiers();authorize();return target;
+    }
+    public void TypeText(object bound,string text,ScreenGeometry geometry,Action authorize) {
+        KeyboardTarget target=(KeyboardTarget)bound;
+        Action guard=()=>{RequireKeyboardTarget(geometry,target);RequireNoLocalModifiers();authorize();RequireKeyboardTarget(geometry,target);RequireNoLocalModifiers();};
+        SubmitText(text,guard);
     }
     static string DesktopName(IntPtr desktop){if(desktop==IntPtr.Zero)return "unavailable";var name=new StringBuilder(128);int needed;if(!GetUserObjectInformation(desktop,2,name,name.Capacity*2,out needed))return "unavailable";return name.ToString()=="Default"?"Default":name.ToString()=="Winlogon"?"Winlogon":"other";}
     static string InputDesktopName(){IntPtr desktop=OpenInputDesktop(0,false,1);try{return DesktopName(desktop);}finally{if(desktop!=IntPtr.Zero)CloseDesktop(desktop);}}

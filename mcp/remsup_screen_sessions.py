@@ -61,11 +61,15 @@ def project_settings(value):
 
 
 KEYS = ('ctrl+l', 'ctrl+a', 'ctrl+c', 'ctrl+v', 'ctrl+x', 'ctrl+z', 'ctrl+y', 'ctrl+w', 'ctrl+f', 'ctrl+s', 'ctrl+shift+s', 'enter', 'tab', 'shift+tab', 'escape', 'backspace', 'delete', 'up', 'down', 'left', 'right', 'home', 'end')
-REFUSAL_CODES = frozenset(('permission-required','mouse-disabled','typing-disabled','control-required','session-mismatch','stale-frame','geometry-changed','geometry-version-mismatch','coordinates-out-of-range','invalid-action','invalid-scroll','input-rate-limit','protected-window','desktop-unavailable','dpi-unavailable','monitor-unavailable','local-input-active','foreground-required','foreground-monitor-mismatch','modifiers-held','keyboard-context-changed','invalid-keyboard-operation','key-not-allowed','text-size-limit','invalid-text','lease-expired'))
+REFUSAL_CODES = frozenset(('permission-required','mouse-disabled','typing-disabled','control-required','session-mismatch','stale-frame','geometry-changed','geometry-version-mismatch','coordinates-out-of-range','invalid-action','invalid-scroll','input-rate-limit','protected-window','desktop-unavailable','dpi-unavailable','monitor-unavailable','local-input-active','foreground-required','foreground-monitor-mismatch','modifiers-held','keyboard-context-changed','invalid-keyboard-operation','key-not-allowed','text-size-limit','invalid-text','text-stream-ended','text-stream-mismatch','text-stream-expired','text-stream-active','text-stream-unsupported','text-stream-sequence','text-stream-overrun','lease-expired'))
 
 
 MAX_TEXT_UNITS = 128      # one receiver text packet
-MAX_STREAM_UNITS = 1024   # streamed text per MCP call: at most eight packets, kept inside the 30 s frame window
+LEGACY_STREAM_UNITS = 1024  # receivers without text streams: at most eight packets, kept inside the 30 s frame window
+MAX_STREAM_UNITS = 20000    # receivers with text streams: one frame and one target binding for the whole text
+TEXT_WAIT = 3.0             # seconds the text call waits before it reports a running stream, so click, progress and cancel can follow
+MAX_PROGRESS_WAIT = 45.0     # longest wait one progress call accepts
+INPUT_OPERATIONS = ('mouse', 'text', 'key', 'text.begin', 'text.chunk', 'text.end')
 INPUT_SPACING = 0.25      # receiver rejects input requests closer than 200 ms
 
 
@@ -98,11 +102,37 @@ class PartialTextInput(RuntimeError):
         super().__init__('screen-text-stream-stopped: ' + json.dumps({'error': error, 'partial': True, 'chunks_sent': chunks_sent, 'chunks_total': chunks_total, 'units_sent': units_sent, 'channel_terminated': channel_terminated, 'warning': warning}, separators=(',', ':')))
 
 
+REFUSAL_REASONS = {
+    'stale-frame': 'The inspected frame is older than 30 seconds or no longer the latest; capture a new frame and retry.',
+    'text-size-limit': 'The text is longer than the receiver accepts in one request.',
+    'invalid-text': 'The text contains characters the receiver does not type.',
+    'input-rate-limit': 'Input arrived faster than the receiver accepts (one request per 200 ms).',
+    'keyboard-context-changed': 'The foreground window or focused control changed, so nothing more was typed.',
+    'foreground-required': 'No eligible foreground application window; bring the target window to the front.',
+    'local-input-active': 'A modifier key was held at the remote computer; typing stopped.',
+    'protected-window': 'The target is a protected (elevated or secure) window that Remsup does not type into.',
+    'geometry-changed': 'The screen layout changed; the session was ended and must be requested again.',
+    'typing-disabled': 'Typing is switched off on the remote computer.',
+    'control-required': 'The session has no control permission.',
+    'text-stream-ended': 'The text stream is no longer open; nothing more was typed.',
+    'text-stream-expired': 'The text stream was idle for more than 20 seconds and was closed.',
+    'text-stream-active': 'Another text stream is already open on this session.',
+    'text-stream-unsupported': 'This receiver version cannot type text longer than 128 units in one stream.',
+    'text-stream-sequence': 'A text packet arrived out of order; the stream was closed.',
+    'text-stream-overrun': 'More text was sent than the stream announced; the stream was closed.',
+    'text-stream-mismatch': 'The text stream id does not match the open stream.',
+    'lease-expired': 'The screen session lease ended.',
+}
+
+
 class ConfirmedInputRefusal(PermissionError, ValueError):
-    def __init__(self,code,channel_terminated=False):
+    def __init__(self,code,channel_terminated=False,stream_open=None):
         self.code=code if code in REFUSAL_CODES else 'remote-tool-refused'
         self.channel_terminated=bool(channel_terminated)
-        super().__init__('screen-input-refused-before-dispatch: '+json.dumps({'error':self.code,'dispatched':False,'channel_terminated':self.channel_terminated},separators=(',',':')))
+        self.stream_open=stream_open
+        body={'error':self.code,'dispatched':False,'channel_terminated':self.channel_terminated}
+        if self.code in REFUSAL_REASONS:body['reason']=REFUSAL_REASONS[self.code]
+        super().__init__('screen-input-refused-before-dispatch: '+json.dumps(body,separators=(',',':')))
 
 
 class ScreenSessions:
@@ -110,6 +140,7 @@ class ScreenSessions:
         self._on_drop = on_drop
         self._sleep = sleep
         self._streaming = set()
+        self._jobs = {}
         self._factory = factory
         self._clock = clock
         self._gate = threading.RLock()
@@ -139,6 +170,8 @@ class ScreenSessions:
 
     def _expire(self):
         now = self._clock()
+        for key, job in list(self._jobs.items()):
+            if job['done'].is_set() and now - job['finished'] >= 630:self._jobs.pop(key, None)
         for key,entry in list(self._closed.items()):
             if now-entry['at']>=630:self._closed.pop(key,None)
         # Pending has one heartbeat grace to observe a last-moment local grant;
@@ -231,6 +264,8 @@ class ScreenSessions:
                 entry = {"caller": caller, "stream": stream, "created": now, "last": now, "state": "Pending", "deadline": now + 30, "can_view": False, "can_control": False}
                 if not self._permission_deadline(entry, response):
                     raise RuntimeError("screen-request-refused")
+                limit = response.get('text_stream_max_utf16', 0)
+                entry['text_stream_max'] = limit if type(limit) is int and 0 <= limit <= MAX_STREAM_UNITS else 0
                 self._sessions[session_id] = entry
                 return response
             except Exception:
@@ -250,7 +285,7 @@ class ScreenSessions:
             if not caller or entry is None or entry["caller"] != caller:
                 raise PermissionError("screen-session-unavailable")
             request_id = str(uuid.uuid4())
-            if operation not in ("status", "capture", "mouse", "text", "key", "close", "settings.read", "settings.set", "cadence"):
+            if operation not in ("status", "capture", "mouse", "text", "key", "text.begin", "text.chunk", "text.end", "close", "settings.read", "settings.set", "cadence"):
                 raise ValueError("invalid-screen-operation")
             if operation == 'settings.read':
                 if fields:
@@ -279,6 +314,25 @@ class ScreenSessions:
                         raise ValueError("key-not-allowed")
                 elif not isinstance(value, str) or not 1 <= len(value.encode("utf-16-le")) // 2 <= 128 or any((ord(c) < 32 and c not in "\r\n\t") or 127 <= ord(c) <= 159 for c in value):
                     raise ValueError("invalid-screen-text")
+            elif operation == "text.begin":
+                if set(fields) != {"frame_id", "geometry_version", "total_units"}:
+                    raise ValueError("invalid-screen-input")
+                uuid.UUID(fields["frame_id"])
+                if type(fields["geometry_version"]) is not int or fields["geometry_version"] < 1 or type(fields["total_units"]) is not int or not 1 <= fields["total_units"] <= MAX_STREAM_UNITS:
+                    raise ValueError("invalid-screen-input")
+            elif operation == "text.chunk":
+                if set(fields) != {"stream_id", "sequence", "text"}:
+                    raise ValueError("invalid-screen-input")
+                uuid.UUID(fields["stream_id"])
+                if type(fields["sequence"]) is not int or not 0 <= fields["sequence"] <= MAX_STREAM_UNITS:
+                    raise ValueError("invalid-screen-input")
+                value = fields["text"]
+                if not isinstance(value, str) or not 1 <= utf16_units(value) <= MAX_TEXT_UNITS or any((ord(c) < 32 and c not in (chr(13), chr(10), chr(9))) or 127 <= ord(c) <= 159 for c in value):
+                    raise ValueError("invalid-screen-text")
+            elif operation == "text.end":
+                if set(fields) != {"stream_id"}:
+                    raise ValueError("invalid-screen-input")
+                uuid.UUID(fields["stream_id"])
             elif operation == "mouse":
                 if set(fields) != {"frame_id", "geometry_version", "action", "x", "y", "scroll_steps"}:
                     raise ValueError("invalid-screen-input")
@@ -361,12 +415,12 @@ class ScreenSessions:
                             raise ValueError('screen-response-mismatch')
                     entry['last'] = self._clock()
                     return result
-                if operation in ("mouse", "text", "key") and response.get("dispatched") is False and isinstance(response.get("error"), str):
+                if operation in INPUT_OPERATIONS and response.get("dispatched") is False and isinstance(response.get("error"), str):
                     code=response['error']
                     terminated=code in ('geometry-changed','lease-expired') or code not in REFUSAL_CODES
                     if terminated:self._drop(session_id,code if code in REFUSAL_CODES else 'closed')
-                    raise ConfirmedInputRefusal(code,terminated)
-                if operation in ('mouse','text','key') and response.get('error') in ('input-not-applied','outcome-unknown'):
+                    raise ConfirmedInputRefusal(code,terminated,response.get('stream_open') if type(response.get('stream_open')) is bool else None)
+                if operation in INPUT_OPERATIONS and response.get('error') in ('input-not-applied','outcome-unknown'):
                     dispatched=response.get('dispatched')
                     if 'dispatched' not in response or response.get('channel_terminated') is not False or (response['error']=='input-not-applied' and dispatched is not True) or (response['error']=='outcome-unknown' and dispatched is not None):
                         raise ValueError('screen-response-mismatch')
@@ -389,8 +443,8 @@ class ScreenSessions:
                     code = 'outcome-unknown' if settings_write_started else 'settings-unavailable'
                     self._drop(session_id, 'outcome-unknown' if code == 'outcome-unknown' else failure_code(exc))
                     return self._settings_response(session_id, request['request_id'], entry, code)
-                self._drop(session_id,'outcome-unknown' if operation in ('mouse','text','key') else failure_code(exc))
-                if operation in ("mouse", "text", "key"):
+                self._drop(session_id,'outcome-unknown' if operation in INPUT_OPERATIONS else failure_code(exc))
+                if operation in INPUT_OPERATIONS:
                     raise RuntimeError("screen-input-outcome-unknown; do not retry automatically") from exc
                 raise
 
@@ -405,9 +459,17 @@ class ScreenSessions:
             units = utf16_units(text)
         except UnicodeEncodeError:
             raise ValueError("invalid-screen-text") from None
-        if not 1 <= units <= MAX_STREAM_UNITS or any((ord(c) < 32 and c not in "\r\n\t") or 127 <= ord(c) <= 159 for c in text):
+        if units < 1 or any((ord(c) < 32 and c not in "\r\n\t") or 127 <= ord(c) <= 159 for c in text):
             raise ValueError("invalid-screen-text")
+        with self._gate:
+            known = self._sessions.get(session_id)
+            limit = known.get('text_stream_max', 0) if known is not None and known['caller'] == caller else 0
+        cap = limit if limit > 0 else LEGACY_STREAM_UNITS
+        if units > cap:
+            raise ValueError("screen-text-too-long: this receiver accepts at most %d UTF-16 units per text request" % cap)
         parts = split_text(text)
+        if limit > 0 and len(parts) > 1:
+            return self._text_job(caller, session_id, frame_id, geometry_version, units, parts)
         if len(parts) == 1:
             return self.operation(caller, session_id, "text", frame_id=frame_id, geometry_version=geometry_version, text=text)
         with self._gate:
@@ -438,7 +500,135 @@ class ScreenSessions:
             with self._gate:
                 self._streaming.discard(session_id)
 
+    # Long text (#136). The receiver types the stream against the target bound at begin, one packet at a time. A worker thread
+    # sends the packets so one tool call never outlives the caller's timeout; progress and cancel are separate calls.
+    @staticmethod
+    def _job_view(job):
+        view = {'result': job['state'], 'stream_id': job['stream_id'], 'complete': job['state'] == 'complete', 'typed_units': job['typed'],
+                'total_units': job['total'], 'chunks_sent': job['chunks'], 'chunks_total': job['chunks_total']}
+        if job.get('error'):
+            view.update({'error': job['error'], 'dispatched': job['dispatched'], 'channel_terminated': job['terminated']})
+            if job['error'] in REFUSAL_REASONS:view['reason'] = REFUSAL_REASONS[job['error']]
+            view['warning'] = 'Typed units are those confirmed before the stop. Do not retry automatically; capture and inspect a new image.'
+        elif job['state'] == 'running':
+            view['warning'] = 'Text is still being typed. Call remsup_screen_text_progress to follow it or remsup_screen_text_cancel to stop it.'
+        return view
+
+    def _finish_job(self, job, state, error=None, dispatched=False, terminated=False):
+        job['state'] = state
+        if error:
+            job['error'], job['dispatched'], job['terminated'] = error, dispatched, terminated
+
+    def _text_job(self, caller, session_id, frame_id, geometry_version, units, parts):
+        with self._gate:
+            if session_id in self._streaming:
+                raise RuntimeError("screen-text-stream-busy")
+            self._streaming.add(session_id)
+        try:
+            begin = self.operation(caller, session_id, "text.begin", frame_id=frame_id, geometry_version=geometry_version, total_units=units)
+            stream_id = begin.get('stream_id') if isinstance(begin, dict) else None
+            if not isinstance(stream_id, str):
+                with self._gate:
+                    self._streaming.discard(session_id)
+                return begin
+            uuid.UUID(stream_id)
+        except BaseException:
+            with self._gate:
+                self._streaming.discard(session_id)
+            raise
+        job = {'caller': caller, 'session': session_id, 'stream_id': stream_id, 'state': 'running', 'total': units, 'typed': 0, 'chunks': 0,
+               'chunks_total': len(parts), 'cancel': threading.Event(), 'done': threading.Event(), 'finished': 0.0}
+        with self._gate:
+            self._jobs[session_id] = job
+        threading.Thread(target=self._run_text_job, args=(job, parts), daemon=True).start()
+        job['done'].wait(TEXT_WAIT)
+        return self._job_view(job)
+
+    def _end_stream(self, job):
+        try:
+            self.operation(job['caller'], job['session'], "text.end", stream_id=job['stream_id'])
+        except Exception:
+            pass
+
+    def _run_text_job(self, job, parts):
+        caller, session_id = job['caller'], job['session']
+        try:
+            for index, part in enumerate(parts):
+                if index:
+                    self._sleep(INPUT_SPACING)
+                if job['cancel'].is_set():
+                    self._end_stream(job)
+                    self._finish_job(job, 'cancelled')
+                    return
+                attempts = 0
+                while True:
+                    try:
+                        result = self.operation(caller, session_id, "text.chunk", stream_id=job['stream_id'], sequence=index, text=part)
+                    except ConfirmedInputRefusal as refusal:
+                        # A rate-limit refusal dispatched nothing and leaves the stream open: wait and send the same packet again.
+                        if refusal.code == 'input-rate-limit' and refusal.stream_open is True and attempts < 3 and not refusal.channel_terminated:
+                            attempts += 1
+                            self._sleep(INPUT_SPACING)
+                            continue
+                        self._finish_job(job, 'stopped', refusal.code, False, refusal.channel_terminated)
+                        return
+                    except PermissionError as exc:
+                        if str(exc) == 'screen-session-unavailable':
+                            self._finish_job(job, 'stopped', 'session-ended', False, True)
+                            return
+                        self._finish_job(job, 'stopped', 'outcome-unknown', None, True)
+                        return
+                    except Exception:
+                        self._finish_job(job, 'stopped', 'outcome-unknown', None, True)
+                        return
+                    break
+                if isinstance(result, dict) and result.get('error') in ('input-not-applied', 'outcome-unknown'):
+                    self._finish_job(job, 'stopped', result['error'], result.get('dispatched'), False)
+                    return
+                expected = job['typed'] + utf16_units(part)
+                if not isinstance(result, dict) or result.get('typed_units') != expected:
+                    self._end_stream(job)
+                    self._finish_job(job, 'stopped', 'screen-response-mismatch', None, False)
+                    return
+                job['typed'] = expected
+                job['chunks'] = index + 1
+            self._end_stream(job)
+            self._finish_job(job, 'complete')
+        finally:
+            job['finished'] = self._clock()
+            with self._gate:
+                self._streaming.discard(session_id)
+            job['done'].set()
+
+    def _own_job(self, caller, session_id):
+        with self._gate:
+            self._expire()
+            job = self._jobs.get(session_id)
+            if job is not None and (not caller or job['caller'] != caller):
+                raise PermissionError("screen-session-unavailable")
+            return job
+
+    def text_progress(self, caller, session_id, wait=0):
+        job = self._own_job(caller, session_id)
+        if job is None:
+            return {'result': 'none', 'complete': False, 'typed_units': 0, 'total_units': 0}
+        if type(wait) not in (int, float) or not 0 <= wait <= MAX_PROGRESS_WAIT:
+            raise ValueError("invalid-screen-input")
+        if wait and not job['done'].is_set():
+            job['done'].wait(wait)
+        return self._job_view(job)
+
+    def text_cancel(self, caller, session_id):
+        job = self._own_job(caller, session_id)
+        if job is None:
+            return {'result': 'none', 'complete': False, 'typed_units': 0, 'total_units': 0}
+        job['cancel'].set()
+        job['done'].wait(5)
+        return {**self._job_view(job), 'cancel_requested': True}
+
     def close_all(self):
         with self._gate:
+            for job in self._jobs.values():
+                job['cancel'].set()
             for key in list(self._sessions):
                 self._drop(key)

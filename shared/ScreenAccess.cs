@@ -12,6 +12,16 @@ internal interface IScreenSurface
     void Keyboard(string text,string key,ScreenGeometry geometry,Action authorize);
     bool ReleaseHeldInputs();
 }
+// Optional capability of a surface: type a long text as consecutive chunks bound to the target identity read when the stream began.
+internal interface ITextStreamSurface
+{
+    object BeginText(ScreenGeometry geometry,Action authorize);
+    void TypeText(object target,string text,ScreenGeometry geometry,Action authorize);
+}
+internal sealed class TextStreamStatus
+{
+    public Guid Id;public int Typed,Total;public bool Complete;
+}
 internal sealed class ScreenImage
 {
     public readonly byte[] Png;
@@ -33,6 +43,11 @@ internal sealed class ScreenAccess
 {
     readonly object gate=new object();readonly ScreenSession session;readonly ScreenFrames frames;readonly IScreenSurface surface;
     ScreenGeometry requestedGeometry;
+    readonly Func<long> clock;
+    sealed class TextStream{internal Guid Id,Lease;internal string Connection;internal int Total,Typed,NextSequence;internal long LastMs;internal object Target;internal ScreenGeometry Geometry;}
+    TextStream textStream;
+    const long TextStreamIdleMs=20000;
+    public int TextStreamLimit{get{return surface is ITextStreamSurface?ScreenKeyboard.MaxStreamUnits:0;}}
     bool viewAllowed=true,controlAllowed=true,mouseAllowed=true,typingAllowed=true;
     public bool ControlAllowed{get{lock(gate)return controlAllowed;}}
     bool autoAcceptLocal;
@@ -61,7 +76,7 @@ internal sealed class ScreenAccess
     void EnsureCleanRelease(){if(surface.HasPendingRelease){try{surface.ReleaseHeldInputs();}catch{}if(surface.HasPendingRelease)throw new InvalidOperationException("pending-input-release");}}
     internal ScreenAccess(IScreenSurface provider,Func<long> clock)
     {
-        if(provider==null)throw new ArgumentNullException("provider");surface=provider;session=new ScreenSession(clock);frames=new ScreenFrames(session,clock);session.Invalidated+=()=>{try{surface.ReleaseHeldInputs();}catch{}};session.Invalidated+=()=>{frames.CaptureIntervalMs=1000;};
+        if(provider==null)throw new ArgumentNullException("provider");surface=provider;this.clock=clock;session=new ScreenSession(clock);frames=new ScreenFrames(session,clock);session.Invalidated+=()=>{textStream=null;};session.Invalidated+=()=>{try{surface.ReleaseHeldInputs();}catch{}};session.Invalidated+=()=>{frames.CaptureIntervalMs=1000;};
     }
     public ScreenSessionSnapshot Snapshot{get{lock(gate)return session.Snapshot;}}
     public Guid Request(string connection,string monitor,bool control){
@@ -142,6 +157,64 @@ internal sealed class ScreenAccess
         lock(gate){if(!typingAllowed)throw new InvalidOperationException("typing-disabled");ScreenKeyboard.Validate(text,key);session.Require(connection,lease,true);Interactive();var geometry=surface.Geometry(session.Snapshot.MonitorId);
             frames.ValidateKeyboard(connection,lease,frame,geometry,geometryVersion);Interactive();session.Require(connection,lease,true);
             surface.Keyboard(text,key,geometry,()=>session.Require(connection,lease,true));}
+    }
+    // Long text (#136). Begin validates exactly what a single text request validates (control, fresh inspected frame, geometry,
+    // input clock) and binds the keyboard target. Each chunk is typed under the per-scalar guard against that bound target; a
+    // changed foreground or focus ends the stream. Any failure ends the stream, except a rate-limit refusal, which dispatched nothing.
+    TextStream RequireTextStream(string connection,Guid lease,Guid id){
+        if(textStream==null)throw new InvalidOperationException("text-stream-ended");
+        if(textStream.Connection!=connection||textStream.Lease!=lease)throw new InvalidOperationException("session-mismatch");
+        if(textStream.Id!=id)throw new InvalidOperationException("text-stream-mismatch");
+        if(clock()-textStream.LastMs>TextStreamIdleMs){textStream=null;throw new InvalidOperationException("text-stream-expired");}
+        return textStream;
+    }
+    public Guid TextBegin(string connection,Guid lease,Guid frame,int geometryVersion,int totalUnits) {
+        lock(gate){
+            if(!typingAllowed)throw new InvalidOperationException("typing-disabled");
+            var streamSurface=surface as ITextStreamSurface;if(streamSurface==null)throw new InvalidOperationException("text-stream-unsupported");
+            if(totalUnits<1||totalUnits>ScreenKeyboard.MaxStreamUnits)throw new InvalidOperationException("text-size-limit");
+            session.Require(connection,lease,true);Interactive();
+            if(textStream!=null&&clock()-textStream.LastMs>TextStreamIdleMs)textStream=null;
+            if(textStream!=null)throw new InvalidOperationException("text-stream-active");
+            var geometry=surface.Geometry(session.Snapshot.MonitorId);
+            frames.ValidateKeyboard(connection,lease,frame,geometry,geometryVersion);Interactive();session.Require(connection,lease,true);
+            object target=streamSurface.BeginText(geometry,()=>session.Require(connection,lease,true));
+            textStream=new TextStream{Id=Guid.NewGuid(),Lease=lease,Connection=connection,Total=totalUnits,Typed=0,NextSequence=0,LastMs=clock(),Target=target,Geometry=geometry};
+            return textStream.Id;
+        }
+    }
+    public TextStreamStatus TextChunk(string connection,Guid lease,Guid id,int sequence,string text) {
+        lock(gate){
+            var stream=RequireTextStream(connection,lease,id);
+            var streamSurface=surface as ITextStreamSurface;
+            try{
+                if(!typingAllowed)throw new InvalidOperationException("typing-disabled");
+                if(sequence!=stream.NextSequence)throw new InvalidOperationException("text-stream-sequence");
+                if(text==null)throw new InvalidOperationException("invalid-text");
+                ScreenKeyboard.Validate(text,null);
+                if(stream.Typed+text.Length>stream.Total)throw new InvalidOperationException("text-stream-overrun");
+                session.Require(connection,lease,true);Interactive();
+                var geometry=surface.Geometry(session.Snapshot.MonitorId);
+                if(!stream.Geometry.Matches(geometry)){session.Revoke();throw new InvalidOperationException("geometry-changed");}
+                frames.ValidateStreamInput(connection,lease);Interactive();session.Require(connection,lease,true);
+                streamSurface.TypeText(stream.Target,text,geometry,()=>session.Require(connection,lease,true));
+            }catch(InvalidOperationException ex){
+                if(ex.Message!="input-rate-limit"&&ReferenceEquals(textStream,stream))textStream=null;
+                throw;
+            }catch{
+                if(ReferenceEquals(textStream,stream))textStream=null;
+                throw;
+            }
+            stream.Typed+=text.Length;stream.NextSequence++;stream.LastMs=clock();
+            return new TextStreamStatus{Id=stream.Id,Typed=stream.Typed,Total=stream.Total,Complete=stream.Typed==stream.Total};
+        }
+    }
+    public bool TextStreamOpen(Guid id){lock(gate)return textStream!=null&&textStream.Id==id;}
+    public TextStreamStatus TextEnd(string connection,Guid lease,Guid id) {
+        lock(gate){
+            var stream=RequireTextStream(connection,lease,id);textStream=null;
+            return new TextStreamStatus{Id=stream.Id,Typed=stream.Typed,Total=stream.Total,Complete=stream.Typed==stream.Total};
+        }
     }
     public void Mouse(string connection,Guid lease,Guid frame,string action,int x,int y,int scrollSteps,int geometryVersion=-1)
     {

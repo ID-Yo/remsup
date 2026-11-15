@@ -6,11 +6,11 @@ using System.Windows.Media.Imaging;
 
 internal static class ScreenChannelTests
 {
-    sealed class Synthetic:IScreenSurface
+    sealed class Synthetic:IScreenSurface,ITextStreamSurface
     {
         public bool Changed;public int Captures,Inputs;public Exception Failure;
         public bool IsInteractive=>true;
-        public ScreenGeometry Geometry(string monitor)=>monitor=="synthetic"?new ScreenGeometry(monitor,1,-4,0,4,4):throw new InvalidOperationException("monitor-unavailable");
+        public int GeoVersion=1;public ScreenGeometry Geometry(string monitor)=>monitor=="synthetic"?new ScreenGeometry(monitor,GeoVersion,-4,0,4,4):throw new InvalidOperationException("monitor-unavailable");
         public ScreenGeometry[] Monitors()=>new[]{Geometry("synthetic")};
         public ScreenImage Capture(ScreenGeometry geometry)
         {
@@ -21,6 +21,9 @@ internal static class ScreenChannelTests
         public bool IsProtectedPoint(ScreenPoint point)=>false;
         public string Typed="",Key="";
         public void Keyboard(string text,string key,ScreenGeometry geometry,Action authorize){authorize();Typed+=text;Key=key;}
+        public int BeginCalls;public string StreamTyped="";public Exception StreamFailure;
+        public object BeginText(ScreenGeometry geometry,Action authorize){authorize();BeginCalls++;return new object();}
+        public void TypeText(object target,string text,ScreenGeometry geometry,Action authorize){authorize();if(StreamFailure!=null)throw StreamFailure;StreamTyped+=text;}
         public int HeldButtons;
         public void Mouse(string action,ScreenPoint point,int steps,Action authorize){
             authorize();Inputs++;if(Failure!=null)throw Failure;
@@ -49,6 +52,48 @@ internal static class ScreenChannelTests
     static JsonElement Response(byte[] data){int length=(data[0]<<24)|(data[1]<<16)|(data[2]<<8)|data[3];return JsonDocument.Parse(data.AsMemory(4,length)).RootElement.Clone();}
     static byte[] Call(ScreenChannel channel,object request){using var stream=new Duplex(Packet(request));channel.ProcessOne(stream,"synthetic-connection");return stream.Output.ToArray();}
     static void Check(bool value,string name){if(!value)throw new Exception(name);}
+    // Long text streams (#136): one frame and target binding for the whole text, chunks of at most 128 units, refusals keep the session.
+    static void TextStreams()
+    {
+        long now=0;var surface=new Synthetic();var access=new ScreenAccess(surface,()=>now);var channel=new ScreenChannel(access);
+        Guid lease=Guid.Empty,frame=Guid.Empty;
+        Action open=()=>{lease=access.Request("synthetic-connection","synthetic",true);access.GrantLocal(lease,true);now+=1100;frame=access.Capture("synthetic-connection",lease).Frame.FrameId;};
+        Action recapture=()=>{now+=1100;frame=access.Capture("synthetic-connection",lease).Frame.FrameId;now+=250;};
+        Func<int,string> units=n=>new string('я',n);
+        Func<int,JsonElement> begin=total=>Response(Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="text.begin",session_id=lease,frame_id=frame,geometry_version=1,total_units=total}));
+        Func<Guid,int,string,JsonElement> chunk=(id,seq,text)=>Response(Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="text.chunk",session_id=lease,stream_id=id,sequence=seq,text}));
+        Func<Guid,JsonElement> end=id=>Response(Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="text.end",session_id=lease,stream_id=id}));
+        Func<JsonElement,Guid> idOf=r=>Guid.Parse(r.GetProperty("stream_id").GetString());
+        Func<JsonElement,string> err=r=>r.TryGetProperty("error",out var e)?e.GetString():"";
+        Check(Response(Call(channel,new{version=1,request_id=Guid.NewGuid(),operation="capabilities"})).GetProperty("text_stream_max_utf16").GetInt32()==20000,"capabilities advertise stream limit");
+        open();
+        var started=begin(300);Guid id=idOf(started);Check(started.GetProperty("total_units").GetInt32()==300&&started.GetProperty("typed_units").GetInt32()==0&&surface.BeginCalls==1,"stream begin binds once");
+        Check(err(begin(10))=="text-stream-active","second stream refused while one is open");
+        now+=250;var progress=chunk(id,0,units(128));Check(progress.GetProperty("typed_units").GetInt32()==128&&!progress.GetProperty("complete").GetBoolean()&&surface.StreamTyped.Length==128,"first chunk typed with progress");
+        var immediate=chunk(id,1,units(128));Check(err(immediate)=="input-rate-limit"&&!immediate.GetProperty("dispatched").GetBoolean()&&immediate.GetProperty("stream_open").GetBoolean()&&surface.StreamTyped.Length==128,"rate limit refuses one chunk and keeps the stream");
+        now+=250;Check(err(chunk(id,5,units(5)))=="text-stream-sequence","out-of-order chunk refused");Check(err(chunk(id,1,"x"))=="text-stream-ended","a refusal other than rate limit ends the stream");
+        Check(access.Snapshot.CanControl&&access.Snapshot.CanView,"refusals leave the screen session open");
+        now+=250;started=begin(130);id=idOf(started);now+=250;chunk(id,0,units(128));now+=250;var over=chunk(id,1,units(3));Check(err(over)=="text-stream-overrun"&&!over.GetProperty("stream_open").GetBoolean(),"overrun refused and ends the stream");
+        now+=250;Check(err(begin(20001))=="text-size-limit"&&err(begin(0))=="text-size-limit","stream size bounds");
+        now+=250;started=begin(200);id=idOf(started);now+=250;chunk(id,0,units(128));now+=250;var done=chunk(id,1,units(72));Check(done.GetProperty("complete").GetBoolean()&&done.GetProperty("typed_units").GetInt32()==200,"complete after the last chunk");
+        var closed=end(id);Check(closed.GetProperty("typed_units").GetInt32()==200&&closed.GetProperty("complete").GetBoolean()&&err(chunk(id,2,"x"))=="text-stream-ended","end closes the stream");
+        // The frame is checked once, when the stream begins; a stream that stays active keeps typing while the frame ages.
+        now+=250;started=begin(256);id=idOf(started);now+=15000;chunk(id,0,units(128));now+=15000;var aged=chunk(id,1,units(100));
+        Check(err(aged)==""&&aged.GetProperty("typed_units").GetInt32()==228&&access.Snapshot.CanControl,"stream continues while the frame ages");
+        now+=250;var stale=begin(10);Check(err(stale)=="text-stream-active","begin during an open stream is refused first");
+        now+=250;chunk(id,2,units(28));now+=250;end(id);
+        now+=250;var old=begin(10);Check(err(old)=="stale-frame"&&!old.GetProperty("dispatched").GetBoolean()&&access.Snapshot.CanControl,"old frame refused at begin, session stays open");
+        // Idle expiry.
+        recapture();started=begin(20);id=idOf(started);now+=20001;Check(err(chunk(id,0,"x"))=="text-stream-expired","idle stream expires");
+        // Surface failure while typing ends the stream without closing the session.
+        recapture();started=begin(20);id=idOf(started);surface.StreamFailure=new Exception("PRIVATE_SENTINEL");now+=250;
+        var failed=chunk(id,0,"abc");Check(err(failed)=="outcome-unknown"&&!failed.GetProperty("stream_open").GetBoolean()&&!failed.ToString().Contains("PRIVATE_SENTINEL")&&access.Snapshot.CanControl,"typing failure is structured and keeps the session");surface.StreamFailure=null;
+        // Revocation ends the stream and a new session starts clean.
+        recapture();started=begin(20);id=idOf(started);access.Stop();
+        open();Check(err(chunk(id,0,"x"))!="","stream does not survive its session");
+        // A geometry change ends the stream and revokes the session.
+        recapture();started=begin(20);id=idOf(started);surface.GeoVersion=2;now+=250;var geometry=chunk(id,0,"x");Check(err(geometry)=="geometry-changed"&&!access.Snapshot.CanControl,"geometry change ends the stream and revokes");
+    }
     [STAThread] static int Main(string[] args)
     {
         try
@@ -159,7 +204,8 @@ internal static class ScreenChannelTests
             lease=access.Request("policy","synthetic",false);visible.ShowCurrentRequest();visible.LocalApproveForFixture(false);Check(access.Snapshot.ElapsedMs==0,"new grant resets elapsed");visible.Close();Check(!access.Snapshot.CanView,"Close revokes");
             lease=access.Request("policy","synthetic",false);access.GrantLocal(lease,false);now+=600000;Check(!access.Snapshot.CanView,"expiry retained despite no countdown");
             lease=access.Request("policy","synthetic",true);access.AutoAcceptLocal=true;access.GrantConfigured(Guid.NewGuid(),"policy");Check(access.Snapshot.State==ScreenSessionState.Pending,"stale configured grant refused");access.GrantConfigured(lease,"foreign");Check(access.Snapshot.State==ScreenSessionState.Pending,"foreign configured grant refused");access.AutoAcceptLocal=false;access.GrantConfigured(lease,"policy");Check(access.Snapshot.State==ScreenSessionState.Pending,"autoaccept off needs manual consent");access.AutoAcceptLocal=true;access.SetPolicy(true,false);var automatic=new ScreenConsentWindow(access);automatic.ShowCurrentRequest();Check(automatic.IsVisible&&automatic.WindowState==System.Windows.WindowState.Normal,"autoaccept card first shown before grant");access.GrantConfigured(lease,"policy");automatic.Refresh();Check(automatic.IsVisible&&automatic.ShowInTaskbar&&automatic.WindowState==System.Windows.WindowState.Minimized,"configured Granted automatically minimizes registered visible card");automatic.ShowCurrentRequest();automatic.Refresh();Check(automatic.WindowState==System.Windows.WindowState.Normal&&access.Snapshot.CanView,"autoaccept restore retains grant");Check(access.Snapshot.AutoAccepted&&access.Snapshot.CanView&&!access.Snapshot.CanControl,"configured grant bounded by control policy");automatic.Close();Check(!access.Snapshot.CanView,"closing restored automatic card revokes grant");access.Stop();
-            Console.WriteLine("PASS wire roundtrip, local owner policy grants, stale/manual/configured permissions, minimize/restore, elapsed timer, Disconnect/Close/expiry and own-window screenshot");return 0;
+            TextStreams();
+            Console.WriteLine("PASS text streams, wire roundtrip, local owner policy grants, stale/manual/configured permissions, minimize/restore, elapsed timer, Disconnect/Close/expiry and own-window screenshot");return 0;
         }
         catch(Exception ex){Console.Error.WriteLine(ex);return 1;}
     }

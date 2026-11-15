@@ -285,10 +285,26 @@ def remsup_screen_mouse(session_id: str, frame_id: str, geometry_version: int, a
 
 @MCP.tool()
 def remsup_screen_text(session_id: str, frame_id: str, geometry_version: int, text: str) -> dict:
-    """Type up to 1024 UTF-16 units into the eligible foreground application on the selected monitor; active keyboard permission required.
-    Text over 128 units is sent as consecutive packets split at Unicode scalar boundaries, at least 250 ms apart, with the same frame.
-    The stream stops at the first refusal or unclear result and is never retried; the frame must stay under 30 seconds old."""
+    """Type text into the eligible foreground application on the selected monitor; active keyboard permission required.
+    Up to 128 UTF-16 units are one request. Longer text (up to 20000 units on receivers with text streams, 1024 on older ones) is typed
+    as a stream: the frame and the target window are checked once when it starts, then packets of at most 128 units follow while the
+    receiver keeps checking the target before every character. The call waits about 3 seconds; if typing continues it returns
+    result=running with typed_units and total_units, and the stream is followed with remsup_screen_text_progress or stopped with
+    remsup_screen_text_cancel. A refusal stops the stream, reports what was typed and why, keeps the session open, and is never retried."""
     return screen_call("text", lambda caller: SCREEN.text(caller, session_id, frame_id, geometry_version, text))
+
+
+@MCP.tool()
+def remsup_screen_text_progress(session_id: str, wait_seconds: int = 0) -> dict:
+    """Report the long text stream of this session: result running, complete, cancelled or stopped, with typed_units, total_units and the
+    refusal reason if it stopped. wait_seconds (0..45) waits for the stream to finish before answering."""
+    return screen_call("text_progress", lambda caller: SCREEN.text_progress(caller, session_id, wait_seconds))
+
+
+@MCP.tool()
+def remsup_screen_text_cancel(session_id: str) -> dict:
+    """Stop the long text stream of this session before its next packet. Characters already typed stay typed; typed_units says how many."""
+    return screen_call("text_cancel", lambda caller: SCREEN.text_cancel(caller, session_id))
 
 
 @MCP.tool()

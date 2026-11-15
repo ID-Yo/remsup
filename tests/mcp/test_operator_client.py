@@ -152,6 +152,114 @@ class ClientTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(self.module.ClientError,'latest-inspected-frame'):await self.module.execute(self.request,fake)
         self.assertEqual(seen.count('remsup_screen_text'),1);self.assertEqual(seen[-1],'remsup_screen_close')
 
+    def _screen_fake(self, seen, sent, **overrides):
+        base={'remsup_health':{'ok':True,'relay_host':'127.0.0.1','relay_port':8443},'remsup_screen_capabilities':{'available':True,'monitors':[{'monitor_id':'synthetic'}]},'remsup_screen_request':{'session_id':'session'},'remsup_screen_status':{'state':'Granted','can_view':True},'remsup_screen_capture':{'frame_id':'frame','geometry_version':1},'remsup_screen_close':{}}
+        base.update(overrides)
+        async def fake(name,args):
+            seen.append(name);sent.append(args)
+            value=base[name]
+            if callable(value):value=value(args)
+            if isinstance(value,Exception):raise value
+            return value
+        return fake
+    def _actions(self, *items):
+        queue=list(items)
+        async def next_action():return queue.pop(0) if queue else {'action':'close'}
+        return next_action
+    def _refusal(self, code, terminated=False):
+        return self.module.ClientError(code,{'error':code,'dispatched':False,'channel_terminated':terminated,'reason':'because '+code})
+    async def test_running_long_text_in_interactive_use_is_stopped_before_close(self):
+        self.request.update(operation='screen',monitor_id='synthetic')
+        seen=[];sent=[];events=[]
+        running={'result':'running','typed_units':128,'total_units':900,'complete':False}
+        fake=self._screen_fake(seen,sent,remsup_screen_text=running,remsup_screen_text_progress=running,remsup_screen_text_cancel={'result':'cancelled','typed_units':256,'total_units':900})
+        nxt=self._actions({'action':'capture'},{'action':'text','text':'long','frame_id':'frame','geometry_version':1},{'action':'text-progress','wait':1})
+        await self.module.execute(self.request,fake,events.append,nxt)
+        self.assertEqual(seen[-4:],['remsup_screen_text','remsup_screen_text_progress','remsup_screen_text_cancel','remsup_screen_close'])
+        self.assertEqual(sent[seen.index('remsup_screen_text_progress')],{'session_id':'session','wait_seconds':1})
+        self.assertEqual([e for e in events if 'cleanup_text' in e],[{'cleanup_text':'cancelled','typed_units':256,'total_units':900}])
+    async def test_text_progress_wait_reaches_the_server_under_its_own_parameter_name(self):
+        import ast
+        server=ast.parse((PATH.parents[3]/'mcp/remsup_mcp_server.py').read_text(encoding='utf-8'))
+        params=[a.arg for n in ast.walk(server) if isinstance(n,ast.FunctionDef) and n.name=='remsup_screen_text_progress' for a in n.args.args]
+        self.assertEqual(params,['session_id','wait_seconds'])
+        for field in ('wait','wait_seconds'):
+            self.request.update(operation='screen',monitor_id='synthetic',screen_actions=[{'action':'text-progress',field:7}])
+            seen=[];sent=[]
+            await self.module.execute(self.request,self._screen_fake(seen,sent,remsup_screen_text_progress={'result':'none'}),None)
+            progress=sent[seen.index('remsup_screen_text_progress')]
+            self.assertEqual(progress,{'session_id':'session','wait_seconds':7})
+            self.assertEqual(set(progress)-set(params),set())
+        self.request['screen_actions']=[{'action':'text-progress','wait':1,'wait_seconds':1}]
+        with self.assertRaises(self.module.ClientError):await self.module.execute(self.request,self._screen_fake([],[]),None)
+        for bad in (-1,46,'5',True):
+            self.request['screen_actions']=[{'action':'text-progress','wait':bad}]
+            with self.assertRaises(self.module.ClientError):await self.module.execute(self.request,self._screen_fake([],[]),None)
+    async def test_interactive_refusal_keeps_the_session_and_continues(self):
+        self.request.update(operation='screen',monitor_id='synthetic')
+        seen=[];sent=[];events=[];texts=[self._refusal('stale-frame'),{'result':'complete','typed_units':300,'total_units':300}]
+        fake=self._screen_fake(seen,sent,remsup_screen_text=lambda a:texts.pop(0))
+        act={'action':'text','text':'x','frame_id':'frame','geometry_version':1}
+        nxt=self._actions({'action':'capture'},act,{'action':'capture'},act)
+        out=await self.module.execute(self.request,fake,events.append,nxt)
+        self.assertEqual(seen.count('remsup_screen_text'),2);self.assertEqual(seen.count('remsup_screen_close'),1);self.assertEqual(seen[-1],'remsup_screen_close')
+        refused=[e for e in events if 'refused' in e]
+        self.assertEqual(refused[0]['refused']['error'],'stale-frame');self.assertIs(refused[0]['refused']['dispatched'],False);self.assertIn('because',refused[0]['refused']['reason'])
+        self.assertEqual(out['screen'][-1]['result']['result'],'complete')
+    async def test_refusal_that_made_the_frame_stale_requires_a_new_capture(self):
+        self.request.update(operation='screen',monitor_id='synthetic')
+        seen=[];sent=[]
+        fake=self._screen_fake(seen,sent,remsup_screen_text=lambda a:self._refusal('stale-frame'))
+        act={'action':'text','text':'x','frame_id':'frame','geometry_version':1}
+        with self.assertRaisesRegex(self.module.ClientError,'latest-inspected-frame'):
+            await self.module.execute(self.request,fake,None,self._actions({'action':'capture'},act,act))
+        self.assertEqual(seen.count('remsup_screen_text'),1);self.assertEqual(seen[-1],'remsup_screen_close')
+    async def test_refusal_that_leaves_the_frame_valid_allows_the_next_input(self):
+        self.request.update(operation='screen',monitor_id='synthetic')
+        seen=[];sent=[];answers=[self._refusal('input-rate-limit'),{'result':'complete','typed_units':1,'total_units':1}]
+        fake=self._screen_fake(seen,sent,remsup_screen_text=lambda a:answers.pop(0))
+        act={'action':'text','text':'x','frame_id':'frame','geometry_version':1}
+        await self.module.execute(self.request,fake,None,self._actions({'action':'capture'},act,act))
+        self.assertEqual(seen.count('remsup_screen_text'),2)
+    async def test_terminated_refusal_still_ends_the_run(self):
+        self.request.update(operation='screen',monitor_id='synthetic')
+        seen=[];sent=[]
+        fake=self._screen_fake(seen,sent,remsup_screen_text=lambda a:self._refusal('geometry-changed',True))
+        act={'action':'text','text':'x','frame_id':'frame','geometry_version':1}
+        with self.assertRaises(self.module.ClientError) as caught:
+            await self.module.execute(self.request,fake,None,self._actions({'action':'capture'},act,act))
+        self.assertEqual(str(caught.exception),'geometry-changed');self.assertEqual(seen.count('remsup_screen_text'),1)
+    async def test_scripted_refusal_still_fails_the_run_and_closes(self):
+        self.request.update(operation='screen',monitor_id='synthetic',screen_actions=[{'action':'capture'},{'action':'text','text':'x','frame_id':'frame','geometry_version':1}])
+        seen=[];sent=[]
+        fake=self._screen_fake(seen,sent,remsup_screen_text=lambda a:self._refusal('stale-frame'))
+        with self.assertRaises(self.module.ClientError):await self.module.execute(self.request,fake,None)
+        self.assertEqual(seen[-1],'remsup_screen_close')
+    async def test_scripted_long_text_is_followed_to_the_end(self):
+        self.request.update(operation='screen',monitor_id='synthetic',screen_actions=[{'action':'capture'},{'action':'text','text':'long','frame_id':'frame','geometry_version':1}])
+        seen=[];sent=[]
+        answers=[{'result':'running','typed_units':128,'total_units':400,'complete':False},{'result':'complete','typed_units':400,'total_units':400,'complete':True}]
+        fake=self._screen_fake(seen,sent,remsup_screen_text={'result':'running','typed_units':128,'total_units':400,'complete':False},remsup_screen_text_progress=lambda a:answers.pop(0))
+        out=await self.module.execute(self.request,fake,None)
+        self.assertEqual(seen.count('remsup_screen_text_progress'),2);self.assertNotIn('remsup_screen_text_cancel',seen)
+        self.assertEqual(sent[seen.index('remsup_screen_text_progress')],{'session_id':'session','wait_seconds':30})
+        self.assertEqual(out['screen'][-1]['result']['result'],'complete')
+    async def test_finished_long_text_is_not_cancelled_at_close(self):
+        self.request.update(operation='screen',monitor_id='synthetic',screen_actions=[{'action':'capture'},{'action':'text','text':'long','frame_id':'frame','geometry_version':1}])
+        seen=[]
+        async def fake(name,args):
+            seen.append(name)
+            return {'remsup_health':{'ok':True,'relay_host':'127.0.0.1','relay_port':8443},'remsup_screen_capabilities':{'available':True,'monitors':[{'monitor_id':'synthetic'}]},'remsup_screen_request':{'session_id':'session'},'remsup_screen_status':{'state':'Granted','can_view':True},'remsup_screen_capture':{'frame_id':'frame','geometry_version':1},'remsup_screen_text':{'result':'complete','typed_units':900,'total_units':900,'complete':True},'remsup_screen_close':{}}[name]
+        await self.module.execute(self.request,fake,lambda e:None)
+        self.assertNotIn('remsup_screen_text_cancel',seen)
+    async def test_text_refusals_name_their_reason(self):
+        text='Error executing tool remsup_screen_text: screen-text-too-long: this receiver accepts at most 1024 UTF-16 units per text request'
+        code,details=self.module.local_refusal(text)
+        self.assertEqual(code,'screen-text-too-long');self.assertIs(details['dispatched'],False);self.assertEqual(details['max_units'],1024);self.assertIn('split it',details['reason'])
+        self.assertEqual(self.module.local_refusal('invalid-screen-text')[0],'invalid-screen-text')
+        self.assertIsNone(self.module.local_refusal('something else'))
+        message='screen-input-refused-before-dispatch: '+__import__('json').dumps({'error':'stale-frame','dispatched':False,'channel_terminated':False,'reason':'The inspected frame is older than 30 seconds.'})
+        self.assertEqual(self.module.screen_refusal(message),{'error':'stale-frame','dispatched':False,'channel_terminated':False,'reason':'The inspected frame is older than 30 seconds.'})
     async def test_unknown_screen_outcome_is_not_refusal(self):
         self.assertEqual(self.module.remote_error_category('Error executing tool: screen-input-outcome-unknown; do not retry automatically'),'outcome-unknown')
     async def test_dispatched_failure_extracts_safe_fields(self):

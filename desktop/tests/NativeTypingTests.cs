@@ -371,6 +371,76 @@ internal static class NativeTypingTests
         }
     }
 
+    // Deterministic long text with ASCII counters, Cyrillic, symbols, a line feed and a non-BMP character per block.
+    static string LongText(int units)
+    {
+        var text = new StringBuilder();
+        int block = 0;
+        while (text.Length < units)
+        {
+            text.Append(block.ToString("D4")).Append("-abc{}[]<>|\\\"'~^@#$%&* Бързата кафява лисица прескача мързеливото куче. ЩЮЯ щюя ъь № 😀 ");
+            block++;
+        }
+        string value = text.ToString(0, units);
+        if (char.IsHighSurrogate(value[value.Length - 1])) value = value.Substring(0, value.Length - 1);
+        return value;
+    }
+
+    static string Lf(string value) { return value.Replace("\r\n", "\n"); }
+
+    static void RunLongTextFixture(WindowsScreenSurface surface, ScreenGeometry geometry)
+    {
+        string record = Path.Combine(Path.GetTempPath(), "RemsupTypingLong-" + Guid.NewGuid().ToString("N") + ".txt");
+        Process child = null;
+        try
+        {
+            child = Process.Start(SelfStart("--fixture-child", record, (geometry.X + 40).ToString(), (geometry.Y + 40).ToString()));
+            if (child == null) throw new Exception("Could not start owned edit fixture");
+            Task<string> readyLine = child.StandardOutput.ReadLineAsync();
+            if (!readyLine.Wait(40000) || !readyLine.Result.StartsWith("READY ", StringComparison.Ordinal))
+                throw new Exception("Owned edit fixture did not become ready");
+            string[] ready = readyLine.Result.Split(' ');
+            IntPtr hwnd = new IntPtr(long.Parse(ready[1]));
+            Place(hwnd, geometry);
+            ClickOwnedTarget(surface, hwnd, (uint)child.Id, int.Parse(ready[2]), int.Parse(ready[3]));
+            WaitForeground(hwnd, (uint)child.Id);
+            Action authorize = () => RequireOwnForeground(hwnd, (uint)child.Id);
+            string text = LongText(LongTextUnits());
+            var watch = Stopwatch.StartNew();
+            TypeLong(surface, geometry, authorize, text);
+            long typed = watch.ElapsedMilliseconds;
+            bool exact = SpinWait.SpinUntil(() => Lf(ReadText(record) ?? "") == text, 20000);
+            Check(exact, "test-owned edit received exactly " + text.Length + " UTF-16 units of mixed ASCII/Cyrillic/symbol/emoji text (typed in " + typed + " ms, " + (text.Length * 1000L / Math.Max(1, typed)) + " units/s; actual length " + (ReadText(record) ?? "").Length + ")");
+        }
+        finally
+        {
+            if (child != null)
+            {
+                try { child.CloseMainWindow(); if (!child.WaitForExit(2000)) child.Kill(true); }
+                catch (InvalidOperationException) { }
+                child.Dispose();
+            }
+            try { if (File.Exists(record)) File.Delete(record); } catch (IOException) { }
+            try { if (File.Exists(record + ".caret")) File.Delete(record + ".caret"); } catch (IOException) { }
+        }
+    }
+
+    static int LongTextUnits() { return int.TryParse(Environment.GetEnvironmentVariable("REMSUP_LONG_TEXT_UNITS"), out int value) && value > 0 ? value : 5000; }
+
+    static void TypeLong(WindowsScreenSurface surface, ScreenGeometry geometry, Action authorize, string text)
+    {
+        // The stream path of the receiver: the keyboard target is bound once, every chunk is typed under the per-scalar guard.
+        object target = surface.BeginText(geometry, authorize);
+        int offset = 0;
+        while (offset < text.Length)
+        {
+            int length = Math.Min(128, text.Length - offset);
+            if (char.IsHighSurrogate(text[offset + length - 1])) length--;
+            surface.TypeText(target, text.Substring(offset, length), geometry, authorize);
+            offset += length;
+        }
+    }
+
     static void RequireOwnForeground(IntPtr window, uint pid)
     {
         uint current;
@@ -588,6 +658,7 @@ internal static class NativeTypingTests
         ScreenGeometry geometry = FirstMonitor(surface);
         int failures = 0;
         RunNativeFixture("owned WPF edit", () => RunEditFixture(surface, geometry), ref failures);
+        RunNativeFixture("owned WPF long text", () => RunLongTextFixture(surface, geometry), ref failures);
         RunNativeFixture("owned WinForms focused-child change", () => RunFocusedChildChangeFixture(surface, geometry), ref failures);
         bool positiveConsole = false; int beforeConsole = failures;
         RunNativeFixtureResult("classic console (#128)", () => { positiveConsole = RunConsoleFixture(surface, geometry); return positiveConsole ? "PASS" : "SKIP"; }, ref failures);
@@ -596,6 +667,16 @@ internal static class NativeTypingTests
             failures++; Console.Error.WriteLine("FAIL fixture classic console (#128): REMSUP_REQUIRE_POSITIVE_CONSOLE=1 but the positive path did not run");
         }
         RunNativeFixture("isolated browser", () => RunBrowserFixture(surface, geometry), ref failures);
+        return failures == 0 ? 0 : 1;
+    }
+
+    // Runs only the long-text fixture (REMSUP_TEST_OWN_NATIVE_INPUT=1, optional REMSUP_LONG_TEXT_UNITS).
+    static int LongTextOnly()
+    {
+        if (Environment.GetEnvironmentVariable("REMSUP_TEST_OWN_NATIVE_INPUT") != "1") { Console.WriteLine("SKIP long text: set REMSUP_TEST_OWN_NATIVE_INPUT=1"); return 0; }
+        var surface = new WindowsScreenSurface();
+        int failures = 0;
+        RunNativeFixture("owned WPF long text", () => RunLongTextFixture(surface, FirstMonitor(surface)), ref failures);
         return failures == 0 ? 0 : 1;
     }
 
@@ -680,9 +761,29 @@ internal static class NativeTypingTests
         var panel = new StackPanel();
         panel.Children.Add(first); panel.Children.Add(second);
         var window = new Window { Title = "Remsup test-owned edit fixture", Width = 720, Height = 440, Topmost = true, WindowStartupLocation = WindowStartupLocation.Manual, Content = panel };
-        first.TextChanged += (_, __) => File.WriteAllText(record, first.Text, Encoding.UTF8);
-        first.SelectionChanged += (_, __) => File.WriteAllText(record + ".caret", first.SelectionStart.ToString());
-        second.TextChanged += (_, __) => File.WriteAllText(record + ".second", second.Text, Encoding.UTF8);
+        // The record is written from a timer, once per change burst, and a sharing violation (a scanner or the reading test)
+        // is retried: a failed write must never take the fixture down in the middle of a long text.
+        bool dirty = false, caretDirty = false, secondDirty = false;
+        Action<string, string> write = (path, content) =>
+        {
+            for (int attempt = 0; attempt < 20; attempt++)
+            {
+                try { File.WriteAllText(path, content, Encoding.UTF8); return; }
+                catch (IOException) { Thread.Sleep(25); }
+                catch (UnauthorizedAccessException) { Thread.Sleep(25); }
+            }
+        };
+        first.TextChanged += (_, __) => dirty = true;
+        first.SelectionChanged += (_, __) => caretDirty = true;
+        second.TextChanged += (_, __) => secondDirty = true;
+        var flush = new System.Windows.Threading.DispatcherTimer { Interval = TimeSpan.FromMilliseconds(40) };
+        flush.Tick += (_, __) =>
+        {
+            if (dirty) { dirty = false; write(record, first.Text); }
+            if (caretDirty) { caretDirty = false; write(record + ".caret", first.SelectionStart.ToString()); }
+            if (secondDirty) { secondDirty = false; write(record + ".second", second.Text); }
+        };
+        flush.Start();
         window.ContentRendered += (_, __) =>
         {
             IntPtr previous = SetThreadDpiAwarenessContext(new IntPtr(-4));
@@ -710,6 +811,7 @@ internal static class NativeTypingTests
             if (args.Length > 0 && args[0] == "--fixture-child") return Fixture(args);
             if (args.Length > 0 && args[0] == "--focus-fixture") return FocusFixture(args);
             if (args.Length > 0 && args[0] == "--native") return Native();
+            if (args.Length > 0 && args[0] == "--long-text") return LongTextOnly();
             if (args.Length > 0 && args[0] == "--console-fixture") return ConsoleFixtureMode(args);
             return Validate();
         }

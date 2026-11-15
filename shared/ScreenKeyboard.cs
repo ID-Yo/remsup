@@ -8,6 +8,9 @@ internal static class ScreenKeyboard
         "up", "down", "left", "right", "home", "end"
     };
 
+    public const int MaxPacketUnits = 128;
+    public const int MaxStreamUnits = 20000;
+
     public static void Validate(string text, string key)
     {
         if ((text == null) == (key == null))
@@ -20,7 +23,7 @@ internal static class ScreenKeyboard
             return;
         }
 
-        if (text.Length < 1 || text.Length > 128)
+        if (text.Length < 1 || text.Length > MaxPacketUnits)
             throw new InvalidOperationException("text-size-limit");
 
         for (int i = 0; i < text.Length; i++)

@@ -220,6 +220,7 @@
   "tests/mcp/test_screen_sessions.py",
   "tests/mcp/test_screen_tools.py",
   "tests/mcp/test_settings_sessions.py",
+  "tests/mcp/test_text_streams.py",
   "tests/relay/test_relay.py",
   "tests/test_public_scan.py",
   "tests/windows/AppearanceTests.cs",
