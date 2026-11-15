@@ -44,6 +44,8 @@ internal static class ModernProgram {
  }
  [STAThread] static void Main(string[] args){
   try{
+   if(args.Length==1&&args[0]==BundleIntegrity.VerifyArgument)return;
+   BundleIntegrity.WarmUp();
    RuntimeSetup.Initialize();
    if(Array.IndexOf(args,"--uninstall")>=0){if(UninstallManager.RequestExisting())return;var uninstallApp=new Application();var choice=new NativeDialogs(null).Uninstall();if(choice!=null)UninstallManager.Schedule(new UserInstallation(),choice.Value);return;}
 

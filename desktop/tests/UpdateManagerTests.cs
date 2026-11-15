@@ -67,6 +67,7 @@ internal static class UpdateManagerTests
         internal int Resumes;
         internal int Completes;
         internal string ReadyEvent;
+        internal Exception StartFailure;
         internal TimeSpan ReadyTimeout;
 
         public Task<bool> TrySuspendIfIdleAsync(CancellationToken cancellationToken)
@@ -78,6 +79,7 @@ internal static class UpdateManagerTests
         public Task<bool> StartCandidateAndWaitForReadyAsync(string executablePath, string readyEventName, TimeSpan timeout, CancellationToken cancellationToken)
         {
             Starts++;
+            if (StartFailure != null) throw StartFailure;
             ReadyEvent = readyEventName;
             ReadyTimeout = timeout;
             return Task.FromResult(CandidateReady);
@@ -109,6 +111,8 @@ internal static class UpdateManagerTests
             await VerifyFailedCandidateRollsBack(root);
             await VerifyBusyInstallPreservesVerifiedPackage(root);
             await VerifyRuntimePackageStagingAndRollback(root);
+            await VerifyIncompleteBundleIsRefusedBeforeSuspend(root);
+            await VerifyMissingFileFailureIsDescribed(root);
             VerifyLockedCleanupAndStartup(root);
             Console.WriteLine("Updater manifest, TLS resource allowlist, SHA256 verification, install handoff and rollback PASS");
         }
@@ -231,6 +235,36 @@ internal static class UpdateManagerTests
         string backup=Path.Combine(folder,"Remsup.previous.exe");File.SetLastWriteTimeUtc(backup,DateTime.UtcNow.AddDays(-8));using(var locked=new FileStream(backup,FileMode.Open,FileAccess.Read,FileShare.Read)){UpdateManager.CleanupAgedBackup(exe);Check(File.Exists(backup),"locked backup lost");}UpdateManager.CleanupAgedBackup(exe);Check(!File.Exists(backup),"aged backup retry failed");
         File.WriteAllText(backup,"retained");File.WriteAllText(package,"broken");handoff=new TestHandoff{CandidateReady=false};result=await manager.InstallAsync(new VerifiedUpdate(package,"v1.27",Hash(File.ReadAllBytes(package))),exe,handoff);Check(result.Status==UpdateInstallStatus.RolledBack&&File.ReadAllText(exe)=="new"&&File.ReadAllText(backup)=="retained","stable rollback lost predecessor or retained backup");
         string portable=Path.Combine(root,"portable.exe"),target=Path.Combine(root,"install-new","Remsup.exe");File.WriteAllText(portable,"copy");bool committed=false;result=await manager.InstallAsync(new VerifiedUpdate(portable,"v1.25",Hash(File.ReadAllBytes(portable))),portable,new TestHandoff(),default,target,true,()=>committed=true);Check(result.Status==UpdateInstallStatus.Installed&&File.ReadAllText(portable)=="copy"&&File.ReadAllText(target)=="copy"&&committed,"same-version installation lost portable source or commit");
+    }
+
+    // #137: a temp-cleaned extraction cache must refuse the update before suspend/replace, with a clear reason.
+    static async Task VerifyIncompleteBundleIsRefusedBeforeSuspend(string root)
+    {
+        string folder = Path.Combine(root, "bundle-refused"), exe = Path.Combine(folder, "Remsup.exe"), package = Path.Combine(root, "bundle-refused-package.exe");
+        Directory.CreateDirectory(folder); File.WriteAllText(exe, "old"); File.WriteAllText(package, "new");
+        using var manager = new UpdateManager(new HttpClient(), "v1.25", root) { BundleCheck = () => BundleIntegrity.Incomplete("System.IO.Pipes.dll") };
+        var handoff = new TestHandoff();
+        var result = await manager.InstallAsync(new VerifiedUpdate(package, "v1.26", Hash(File.ReadAllBytes(package))), exe, handoff);
+        Check(result.Status == UpdateInstallStatus.Failed && result.ErrorCode == "bundle-incomplete", "incomplete bundle did not fail before the handoff: " + result.Status);
+        Check(result.Error.Contains("System.IO.Pipes.dll") && result.Error.Contains("Restart Remsup and retry"), "incomplete bundle reason is not actionable: " + result.Error);
+        Check(handoff.Suspends == 0 && handoff.Starts == 0 && handoff.Resumes == 0 && File.ReadAllText(exe) == "old" && !File.Exists(Path.Combine(folder, "Remsup.previous.exe")), "incomplete bundle changed sessions or files");
+        Check(Directory.GetFiles(folder, "*.update-*.tmp").Length == 0, "refused update left its adjacent copy");
+        using var healthy = new UpdateManager(new HttpClient(), "v1.25", root) { BundleCheck = () => null };
+        var ok = await healthy.InstallAsync(new VerifiedUpdate(package, "v1.26", Hash(File.ReadAllBytes(package))), exe, new TestHandoff());
+        Check(ok.Status == UpdateInstallStatus.Installed, "a healthy bundle check must not block the update");
+    }
+
+    // #137: the loader's FileNotFoundException has an empty Message; the rollback text must name the file and the next step.
+    static async Task VerifyMissingFileFailureIsDescribed(string root)
+    {
+        string folder = Path.Combine(root, "bundle-described"), exe = Path.Combine(folder, "Remsup.exe"), package = Path.Combine(root, "bundle-described-package.exe");
+        Directory.CreateDirectory(folder); File.WriteAllText(exe, "old"); File.WriteAllText(package, "new");
+        using var manager = new UpdateManager(new HttpClient(), "v1.25", root) { BundleCheck = () => null };
+        var handoff = new TestHandoff { StartFailure = new FileNotFoundException("", "System.IO.Pipes, Version=10.0.0.0") };
+        var result = await manager.InstallAsync(new VerifiedUpdate(package, "v1.26", Hash(File.ReadAllBytes(package))), exe, handoff);
+        Check(result.Status == UpdateInstallStatus.RolledBack && File.ReadAllText(exe) == "old", "missing-file failure did not roll back");
+        Check(result.Error.Contains("launch candidate") && result.Error.Contains("System.IO.Pipes") && result.Error.Contains("Restart Remsup and retry"), "missing-file failure is not described: " + result.Error);
+        Check(UpdateManager.DescribeFailure(new InvalidOperationException("plain")) == "plain", "ordinary failures must keep their message");
     }
 
     static async Task VerifyFailedCandidateRollsBack(string root)

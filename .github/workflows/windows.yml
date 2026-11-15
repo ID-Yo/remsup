@@ -33,6 +33,9 @@ jobs:
       - name: Modern bridge and settings contracts
         shell: pwsh
         run: ./scripts/test-modern-desktop.ps1 -OutputRoot "$env:RUNNER_TEMP/modern-tests"
+      - name: Extraction cache cleanup and update handoff
+        shell: pwsh
+        run: ./scripts/test-bundle-selfheal.ps1 -OutputRoot "$env:RUNNER_TEMP/bundle-selfheal"
       - name: Dependency audit
         shell: pwsh
         run: npm.cmd audit --prefix desktop/ui --audit-level=low

@@ -41,6 +41,7 @@ try{
  Step 'python-suites' {Native $pythonPath @('-B','-m','unittest','discover','-s','tests','-v')}
  Step 'modern-package' {& scripts/build-modern-desktop.ps1 -Dotnet $Dotnet -Publish -Output (Join-Path $OutputRoot 'modern-package')}
  Step 'modern-contracts' {& scripts/test-modern-desktop.ps1 -Dotnet $Dotnet -OutputRoot (Join-Path $OutputRoot 'modern-tests')}
+ Step 'bundle-selfheal' {& scripts/test-bundle-selfheal.ps1 -Dotnet $Dotnet -OutputRoot (Join-Path $OutputRoot 'bundle-selfheal')}
  Step 'dependency-audit' {Native 'npm.cmd' @('audit','--prefix','desktop/ui','--audit-level=low')}
  Step 'diff-check' {Native 'git' @('-c','core.whitespace=cr-at-eol','diff','--check')}
  Step 'source-head' {if((git rev-parse HEAD) -ne $commit -or (git status --porcelain)){throw 'Source changed during CI; rerun on the final clean head'}}

@@ -1,4 +1,5 @@
 using System;
+using System.Reflection;
 using System.IO;
 using System.Net.Http;
 using System.Security.Cryptography;
@@ -97,7 +98,15 @@ internal static class UpdateProcessTests
             client: false);
         var observedHandoff = new CountingHandoff(handoff, () => starts++);
 
-        UpdateInstallResult result = await InstallScenario(scenario, observedHandoff);
+        // #137: after the start-up warm-up the handoff must not load any assembly from disk (a temp-cleaned cache would break it).
+        Check(BundleIntegrity.WarmUp() == null, "handoff assemblies could not be warmed up");
+        var lateLoads = new System.Collections.Generic.List<string>();
+        AssemblyLoadEventHandler recordLoad = (_, loaded) => { if (!loaded.LoadedAssembly.IsDynamic) lock (lateLoads) lateLoads.Add(loaded.LoadedAssembly.GetName().Name); };
+        AppDomain.CurrentDomain.AssemblyLoad += recordLoad;
+        UpdateInstallResult result;
+        try { result = await InstallScenario(scenario, observedHandoff); }
+        finally { AppDomain.CurrentDomain.AssemblyLoad -= recordLoad; }
+        Check(lateLoads.Count == 0, "handoff loaded assemblies that the warm-up list misses: " + string.Join(", ", lateLoads));
         Check(result.Status == UpdateInstallStatus.Installed, "ready child was not installed: " + result.Status + " " + result.Error);
         Check(File.ReadAllBytes(scenario.Executable).AsSpan().SequenceEqual(scenario.PackageBytes), "ready child image was not committed");
         Check(suspended && !resumed && completeCalls == 1 && starts == 1, "successful process handoff order was incorrect");

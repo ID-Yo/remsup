@@ -131,6 +131,8 @@ internal sealed class UpdateManager : IDisposable
     readonly string dataDirectory;
     bool disposed;
     internal Action<UpdateInstallResult> InstallOutcome;
+    // Checks that the running process can still load everything the handoff needs (#137); tests substitute it.
+    internal Func<string> BundleCheck = () => BundleIntegrity.Verify();
 
     internal UpdateManager(HttpClient pinnedClient, string currentVersion, string dataDirectory)
     {
@@ -263,6 +265,14 @@ internal sealed class UpdateManager : IDisposable
                 hasRuntimeDir = false;
             }
 
+            // Before any state changes: a cleaned temp cache would otherwise fail the launch phase and force a rollback.
+            string bundleProblem = await Task.Run(BundleCheck, cancellationToken).ConfigureAwait(false);
+            if (bundleProblem != null)
+            {
+                TryDelete(adjacent);
+                return new UpdateInstallResult(UpdateInstallStatus.Failed, error: bundleProblem, errorCode: "bundle-incomplete");
+            }
+
             if (!await handoff.TrySuspendIfIdleAsync(cancellationToken).ConfigureAwait(false))
             {
                 TryDelete(adjacent);
@@ -342,12 +352,22 @@ internal sealed class UpdateManager : IDisposable
             bool registrationsRestored = !suspended || await TryResumeAsync(handoff, CancellationToken.None).ConfigureAwait(false);
             bool restored = fileRestored && registrationsRestored;
             return new UpdateInstallResult(!restored ? UpdateInstallStatus.RecoveryFailed : suspended ? UpdateInstallStatus.RolledBack : UpdateInstallStatus.Failed,
-                registrationsRestored, "Update handoff failed during "+phase+" ("+failure.GetType().Name+"; 0x"+failure.HResult.ToString("X8")+"): "+failure.Message);
+                registrationsRestored, "Update handoff failed during "+phase+" ("+failure.GetType().Name+"; 0x"+failure.HResult.ToString("X8")+"): "+DescribeFailure(failure));
         }
         finally
         {
             TryDelete(adjacent);
         }
+    }
+
+    // A missing-file failure has an empty Message; name the file and say what to do.
+    internal static string DescribeFailure(Exception failure)
+    {
+        string message = failure.Message ?? "";
+        string file = failure is FileNotFoundException notFound ? notFound.FileName : failure is FileLoadException loadFailure ? loadFailure.FileName : null;
+        if (!string.IsNullOrEmpty(file) && message.IndexOf(file, StringComparison.OrdinalIgnoreCase) < 0) message = (message + " [file: " + file + "]").Trim();
+        if (failure is FileNotFoundException || failure is FileLoadException) message = (message + " Restart Remsup and retry the update.").Trim();
+        return message;
     }
 
     // Call on a later ordinary startup, after the previous process has had time to exit.
